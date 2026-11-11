@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+# Media the tool makes stays local; the folders are kept by their .keep files.
+recordings/*
+animations/*
+states/*
+screenshots/*
+!*/.keep

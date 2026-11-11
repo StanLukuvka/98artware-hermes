@@ -1,0 +1,17 @@
+name: art98
+version: 0.1.0
+description: "Drive a real Windows 98 SE VM through art98: screenshots, pointer, keys, Win32 calls, states and recordings. Stub backend for now."
+provides_tools:
+  - art98_status
+  - art98_media
+  - art98_screenshot
+  - art98_click
+  - art98_type
+  - art98_key
+  - art98_windows
+  - art98_open
+  - art98_win32
+  - art98_revert
+  - art98_set_state
+  - art98_record
+  - art98_render

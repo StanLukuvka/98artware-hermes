@@ -1,6 +1,13 @@
 name: art98
 version: 0.1.0
-description: "Drive a real Windows 98 SE VM through art98: screenshots, pointer, keys, Win32 calls, states and recordings. Stub backend for now."
+author: StanLukuvka
+requires_hermes: ">=0.22.5"
+description: "Drive a real Windows 98 SE VM through art98: screenshots, pointer, keys, Win32 calls, scene scripts rendered to video, and a dashboard tab with a live view."
+manifest_version: 2
+api_version: 1
+license: MIT
+homepage: https://github.com/StanLukuvka/98artware-hermes
+tags: [windows98, retro, video, animation, vm]
 provides_tools:
   - art98_status
   - art98_media
@@ -12,6 +19,16 @@ provides_tools:
   - art98_open
   - art98_win32
   - art98_revert
-  - art98_set_state
-  - art98_record
+  - art98_save_scene
   - art98_render
+  - art98_combine
+# Settings, saved by Hermes under plugins.entries.art98.settings. config.py holds the same keys
+# with their ranges; keep the two in step.
+config_schema:
+  backend: {type: str, choices: [stub, demo, drive], default: stub, label: "Backend", description: "Which Windows 98 the tools drive: drive is the real VM, stub and demo are stand-ins."}
+  desktop: {type: str, choices: [blank, stock], default: blank, label: "Revert to", description: "The desktop a revert starts from."}
+  screenshot_after: {type: bool, default: true, label: "Screenshot after actions", description: "Default when the agent doesn't say."}
+  allow_win32: {type: bool, default: false, label: "Allow art98_win32", description: "Lets the agent call Win32 functions in the guest directly."}
+  live_interval_ms: {type: int, default: 1000, label: "Live refresh (ms)", description: "Screenshot live view refresh, 250 to 10000. The VNC view ignores it."}
+  record_fps: {type: int, default: 30, label: "Recording frame rate", description: "Frames per second for new recordings, 1 to 60."}
+  host_folder: {type: str, default: "", label: "Data folder on this PC", description: "The plugin's data folder as your PC sees it, for the Open in VS Code links; empty hides them."}

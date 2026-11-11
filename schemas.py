@@ -8,8 +8,9 @@ def _tool(name: str, description: str, properties: dict | None = None, required:
     }
 
 
-SHOT_AFTER = {"screenshot_after": {"type": "boolean", "default": True,
-                                   "description": "Return a screenshot of the guest after the action."}}
+SHOT_AFTER = {"screenshot_after": {"type": "boolean",
+                                   "description": "Return a screenshot of the guest after the action. "
+                                                  "Leave out to use the plugin setting (on by default)."}}
 
 ART98_STATUS = _tool(
     "art98_status",
@@ -85,8 +86,36 @@ ART98_RECORD = _tool(
 )
 ART98_RENDER = _tool(
     "art98_render",
-    "Render an art98 animation (scene script in animations/) to a video in recordings/.",
+    "Render an art98 animation (scene script in animations/) to a video in recordings/. "
+    "Every scene starts from a fresh desktop. On failure the error ends with the scene's line.",
     {"animation": {"type": "string", "description": "File name in animations/, e.g. 'intro.py'."},
-     "output": {"type": "string", "description": "File name in recordings/, e.g. 'intro.mp4'."}},
+     "output": {"type": "string", "description": "File name in recordings/, .mp4 or .gif, e.g. 'intro.mp4'."},
+     "scene": {"type": "string", "description": "Scene class to render, when the file holds more than one."}},
     ["animation", "output"],
+)
+
+ART98_COMBINE = _tool(
+    "art98_combine",
+    "Join videos from recordings/ end to end into one new video in recordings/. Works without a VM. "
+    "Clips of different sizes are scaled to fit (sharp pixels) and letterboxed; audio is dropped. "
+    "Returns the output name, size and duration.",
+    {"recordings": {"type": "array", "items": {"type": "string"}, "minItems": 2,
+                    "description": "File names in recordings/, in play order, e.g. ['intro.mp4', 'demo.mp4']."},
+     "output": {"type": "string", "description": "New file name in recordings/, .mp4 or .gif, e.g. 'final.mp4'."},
+     "fade": {"type": "number", "minimum": 0, "maximum": 3,
+              "description": "Cross-fade seconds between clips. Leave out for hard cuts."},
+     "size": {"type": "string", "description": "Output size like '1920x1080'. Leave out to use the first clip's size."},
+     "overwrite": {"type": "boolean", "description": "Replace an existing output file. Off by default."}},
+    ["recordings", "output"],
+)
+
+ART98_SAVE_SCENE = _tool(
+    "art98_save_scene",
+    "Save an art98 scene script into animations/, ready for art98_render. Use it instead of write_file "
+    "or patch, which may not reach that folder. The source must be valid Python; a syntax error is "
+    "refused with its line. Returns the scene classes found in it.",
+    {"name": {"type": "string", "description": "File name in animations/, ending in .py, e.g. 'intro.py'."},
+     "source": {"type": "string", "description": "The whole script, as it should be on disk."},
+     "overwrite": {"type": "boolean", "description": "Replace an existing script of that name. Off by default."}},
+    ["name", "source"],
 )

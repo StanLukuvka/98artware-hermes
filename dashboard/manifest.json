@@ -4,7 +4,11 @@
   "description": "art98: the Windows 98 VM the agent drives, and the plugin's media folders.",
   "icon": "Terminal",
   "version": "0.1.0",
-  "tab": { "path": "/art98", "position": "after:skills" },
+  "tab": {
+    "path": "/art98",
+    "position": "after:skills"
+  },
   "entry": "dist/index.js",
+  "css": "dist/style.css",
   "api": "plugin_api.py"
 }

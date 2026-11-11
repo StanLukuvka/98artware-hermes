@@ -1,8 +1,14 @@
 __pycache__/
 *.pyc
-# Media the tool makes stays local; the folders are kept by their .keep files.
-recordings/*
-animations/*
+.ruff_cache/
+# The plugin's files live in Hermes's plugin-data/art98/, not here. These are left over from
+# running it outside Hermes (ART98_DATA unset): never commit them.
+recordings/
+animations/
+screenshots/
+history.jsonl
+config.json
+.activity.json
+# states/ ships starter files (copied to plugin-data on first use).
 states/*
-screenshots/*
-!*/.keep
+!states/*.json

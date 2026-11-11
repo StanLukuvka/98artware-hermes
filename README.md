@@ -13,6 +13,7 @@ art98/
 ├── media.py             the media folders below: list, resolve safe names
 ├── skills/art98/        SKILL.md: how the model should use the tools
 ├── dashboard/           plugin_api.py: /api/plugins/art98/status and /media/<kind>
+│                        manifest.json + dist/index.js: the /art98 tab in `hermes dashboard`
 ├── desktop/plugin.js    Hermes Desktop pane "Windows 98": status and media lists
 ├── recordings/          videos (.mp4, .gif)
 ├── animations/          art98 scene scripts (.py)
@@ -27,7 +28,9 @@ art98/
    `ln -s "$PWD" ~/.hermes/plugins/art98` from this folder if it goes missing.
 1. Agent half: `hermes plugins enable art98` (adds it to `plugins.enabled` in config.yaml).
    This also imports `dashboard/plugin_api.py` for the pane.
-2. Desktop half: Hermes Desktop → Settings → Plugins → turn on "art98 (Windows 98)".
+2. Web dashboard: `hermes dashboard`, then http://127.0.0.1:9119/art98 (restart the
+   dashboard after changing `dashboard/manifest.json`, or the nav tab won't show).
+3. Desktop half: Hermes Desktop → Settings → Plugins → turn on "art98 (Windows 98)".
    ⌘K → Reload desktop plugins if it doesn't show.
 
 ## Next

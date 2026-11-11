@@ -80,15 +80,25 @@ What the plugin needs, and what it does beyond Hermes's own tools:
 
 - **The art98 library** (the `core/` folder of the 98artware repo), importable inside the
   Hermes process. `desk.py` adds `ART98_CORE` (default `/opt/art98/core`) to `sys.path`.
-  Mount it read-only. No PyPI packages are needed.
+  Mount it read-only. No PyPI packages are needed. It needs a checkout that takes the token
+  from the host program (`Settings.token` / `ART98_TOKEN`, after art98 0.1.0).
 - **An art98 VM**, run by art98 in its own container. The plugin reaches it over two loopback
   TCP ports: the control API (`7598`, token-authenticated) and an optional view-only VNC port
   (`5900`, `ART98_VNC`, default `127.0.0.1:5900`). It opens no other network connections and
   never sends input over VNC.
-- **Client settings**: a folder with art98's client `art98.toml` and the VM token,
-  `ART98_CLIENT` (default `/opt/art98-client`).
+- **Client settings**: a folder with art98's client `art98.toml`, `ART98_CLIENT` (default
+  `/opt/art98-client`).
+- **The VM token**, as the plugin's `vm_token` secret (stored by Hermes as `ART98_VM_TOKEN` and
+  read with `get_secret`). The plugin never reads a token file.
+- **Approval for renders**: `art98_render` runs the agent's scene script as Python, so it asks
+  through the same guard as Hermes's `execute_code`: the user approves it wherever Hermes would
+  ask for `execute_code`, and single-query, cron and other unattended runs follow their
+  `approvals` settings (by default they refuse). Hermes has no public approval call for plugin
+  tools yet, so this imports `tools.approval`; if a release moves it, renders are refused. The
+  dashboard's own Render button is the user's click and doesn't ask.
 - **Subprocesses**: `art98_render` runs `art98 render` in a child Python process, so scene
-  code never runs in the Hermes process. `art98_combine` runs `ffmpeg` and `ffprobe`, which
+  code never runs in the Hermes process. The child gets a small environment (`PATH`, `HOME`,
+  locale, `ART98_*` and the token), none of Hermes's keys. `art98_combine` runs `ffmpeg` and `ffprobe`, which
   must be on `PATH`.
 - **Guest control**: the tools move the guest's mouse and type keys in the VM. `art98_win32`
   calls any Win32 function in the guest, and refuses unless the user turns on `allow_win32`.
@@ -110,7 +120,7 @@ talks to the VM container's API; no art98 command runs outside the Hermes contai
   - `<98artware>/core` read-only at `/opt/art98/core`,
   - `<98artware>/guest/build` (the guest programs, e.g. `view.exe` for picture windows)
     read-only at `/opt/art98/guest/build`,
-  - the client folder (client `art98.toml` + token) at `/opt/art98-client`,
+  - the client folder (the client `art98.toml`) at `/opt/art98-client`,
   - the host's loopback ports 7598 and 5900 inside the container's loopback. With rootless
     Podman's pasta network that is `-T 7598 -T 5900`; nothing is published beyond the PC.
 - **How it drives.** Each action attaches (takes the VM's lock), acts, waits 0.3 s for the
@@ -121,6 +131,9 @@ talks to the VM container's API; no art98 command runs outside the Hermes contai
   VNC: `vnc.py` is a view-only reader that needs no VM lock, so the screen keeps moving during
   renders, at about 6 fps. Without `--vnc` the tab falls back to screenshots through the
   backend, which pause while a render holds the VM.
+- **The token.** Paste the contents of the VM's token file into the plugin's `vm_token`
+  setting (Hermes Desktop → Settings → Plugins → art98), or add `ART98_VM_TOKEN=<token>` to
+  Hermes's `.env`.
 - Restart the Hermes container (or gateway) after changing `desk.py`, `dashboard/manifest.json`
   or `plugin_api.py`; edits to `dashboard/dist/` only need a page reload.
 

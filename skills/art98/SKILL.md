@@ -150,6 +150,9 @@ view of the screen, and one message line in Status for what just happened.
 
 - `busy`: a render or another action holds the VM. Only one thing drives it at a time. Wait a
   few seconds and retry; don't loop fast.
+- `not_approved`: a render runs the script as Python, so Hermes asks the user first, as for
+  `execute_code`. If it was refused (or no one can approve, as in a single-query or cron run),
+  stop and tell the user. Don't render another way or change approval settings.
 - A render writes over an existing video of the same name. Pick a new `output` to keep the old one.
 - The VM's screen is 16-bit. A desktop colour comes out flat only when each of r, g and b is a
   multiple of 8; anything else, such as `(0, 126, 178)`, is painted as dotted lines.

@@ -32,3 +32,4 @@ config_schema:
   live_interval_ms: {type: int, default: 1000, label: "Live refresh (ms)", description: "Screenshot live view refresh, 250 to 10000. The VNC view ignores it."}
   record_fps: {type: int, default: 30, label: "Recording frame rate", description: "Frames per second for new recordings, 1 to 60."}
   host_folder: {type: str, default: "", label: "Data folder on this PC", description: "The plugin's data folder as your PC sees it, for the Open in VS Code links; empty hides them."}
+  vm_token: {type: secret, env: ART98_VM_TOKEN, label: "VM token", description: "The art98 VM's token (the contents of its vm.token on the host). Needed by the drive backend."}

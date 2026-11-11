@@ -83,8 +83,8 @@ First find out where Hermes runs. Use `terminal` to run `docker version` and `he
 5. **Give Hermes the client side** (container only). The container needs, read-only:
    - the art98 library, `98artware/core`, with `ART98_CORE` pointing at it;
    - `98artware/guest/build`, at `/opt/art98/guest/build`;
-   - a client folder holding `vm.token` and an `art98.toml` with `[vm] transport = "tcp"`,
-     `token_file = "vm.token"` and `[ports] connect = "127.0.0.1"`, with `ART98_CLIENT` pointing at it;
+   - a client folder holding an `art98.toml` with `[vm] transport = "tcp"` and
+     `[ports] connect = "127.0.0.1"`, with `ART98_CLIENT` pointing at it (no token in it);
    - the host's loopback ports 7598 (and 5900 for VNC) forwarded into the container's loopback.
 
    Never mount `work/`. Restart the container after changing its mounts.
@@ -94,6 +94,10 @@ First find out where Hermes runs. Use `terminal` to run `docker version` and `he
 7. **Point it at the VM.** In the dashboard's art98 tab (http://127.0.0.1:9119/art98), open the
    cog and set `backend` to `drive`. Set `host_folder` to the plugin's data folder as the host sees
    it (`<HERMES_HOME>/plugin-data/art98` on the host side), so the VS Code links work. Restart the dashboard after the plugin's first install.
+8. **Give it the token.** The user pastes the contents of the VM's token file into the plugin's
+   `vm_token` setting (Hermes Desktop → Settings → Plugins → art98), or adds
+   `ART98_VM_TOKEN=<token>` to Hermes's `.env` and restarts Hermes. Don't read or copy the token
+   yourself; `art98_status` says `no VM token` until it is set.
 
 ## Pitfalls
 

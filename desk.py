@@ -114,12 +114,14 @@ class DriveDesk(Desk):
     """The real backend: art98's library, imported here, talks to the VM container's API.
 
     ART98_CORE is the art98 library folder (mounted read-only) and ART98_CLIENT the folder
-    with the client art98.toml and the VM token. Each action attaches (taking the VM's
+    with the client art98.toml. The VM token comes from Hermes (the plugin's vm_token secret,
+    stored as ART98_VM_TOKEN), never from a file. Each action attaches (taking the VM's
     lock), acts and releases, so the desktop carries on between tool calls. A render runs
     `art98 render` in a child process so a scene's code never runs inside Hermes itself.
     """
 
     name = "drive"
+    runs_code = True  # render runs the scene as Python: tools.py asks for approval first
     RENDER_TIMEOUT_S = 900
     SETTLE_S = 0.3  # let the guest handle input before the VM is paused again
 
@@ -143,7 +145,22 @@ class DriveDesk(Desk):
         path = st.find(self.client)
         if path is None:
             raise NotConnected(f"no art98.toml in {self.client} (set ART98_CLIENT)")
-        return st.Settings(**st._read(path), source=path, root=path.parent)
+        return st.Settings(**st._read(path), source=path, root=path.parent, token=self._token())
+
+    @staticmethod
+    def _token() -> str:
+        """The VM token, through Hermes's secret route (catalog rule 11)."""
+        try:
+            from agent.secret_scope import get_secret
+        except ImportError:  # outside Hermes (tests)
+            import os
+            token = os.environ.get(TOKEN_ENV)
+        else:
+            token = get_secret(TOKEN_ENV)
+        if not token or not token.strip():
+            raise NotConnected("no VM token: set it in the art98 plugin's settings (vm_token), "
+                               f"or {TOKEN_ENV} in Hermes's .env")
+        return token.strip()
 
     def _mark(self, kind: str | None, name: str = "") -> None:
         import json
@@ -299,7 +316,12 @@ class DriveDesk(Desk):
         import sys
         from pathlib import Path
         out = Path(out_path)
-        env = {**os.environ, "PYTHONPATH": str(self.core)}
+        settings = self._settings()
+        # A small environment: the scene is the agent's code, so it gets none of Hermes's keys.
+        keep = ("PATH", "HOME", "LANG", "LC_ALL", "TZ", "TMPDIR")
+        env = {k: os.environ[k] for k in keep if k in os.environ}
+        env.update({k: v for k, v in os.environ.items() if k.startswith("ART98_") and k != TOKEN_ENV})
+        env.update(PYTHONPATH=str(self.core), ART98_TOKEN=settings.token)
         cmd = [sys.executable, "-c", "import sys; from art98.cli import main; sys.exit(main())",
                "render", str(animation_path), *([scene] if scene else []), "-o", str(out), "--wait", "60"]
         self._mark("render", Path(animation_path).name)
@@ -328,6 +350,7 @@ class DriveDesk(Desk):
         return {"output": out.name, "bytes": out.stat().st_size}
 
 
+TOKEN_ENV = "ART98_VM_TOKEN"  # where Hermes keeps the plugin's vm_token secret
 _desk: Desk | None = None
 _desk_lock = threading.Lock()
 _modules: dict[str, Any] = {}

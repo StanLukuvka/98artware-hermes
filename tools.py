@@ -179,7 +179,31 @@ def art98_render(args: dict) -> Any:
     name = args.get("scene") or None
     if name is not None and not str(name).isidentifier():
         return _err("scene must be a class name, e.g. 'Showcase'", code="bad_arguments")
-    return _ok(**get_desk().render(str(scene), str(out), name))
+    desk = get_desk()
+    if getattr(desk, "runs_code", False):
+        guard = _approve_script(scene)
+        if not guard.get("approved"):
+            reason = guard.get("message") or "not approved"
+            return _err("art98_render runs the scene as Python, so it needs the same approval as "
+                        f"execute_code, and Hermes refused it: {reason}", code="not_approved")
+    return _ok(**desk.render(str(scene), str(out), name))
+
+
+def _approve_script(scene) -> dict:
+    """A render runs the agent's script as Python, so it takes the same approval as Hermes's own
+    execute_code: Hermes asks the user wherever it would ask for execute_code, and its policy for
+    cron and other unattended runs applies. Hermes has no public approval call for plugin tools
+    yet, so this uses execute_code's guard; if a release moves it, renders are refused rather
+    than run unasked. Outside Hermes (tests) there is nobody to ask."""
+    try:
+        from tools.approval import check_execute_code_guard
+    except ImportError:
+        import sys
+        if "hermes_cli" not in sys.modules:
+            return {"approved": True}  # not inside Hermes
+        return {"approved": False, "message": "this Hermes has no approval guard the art98 plugin "
+                "knows, so it won't run scripts; update the plugin"}
+    return check_execute_code_guard(scene.read_text(encoding="utf-8"), "local")
 
 
 MAX_SCENE_BYTES = 256 * 1024

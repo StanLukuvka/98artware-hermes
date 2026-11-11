@@ -32,7 +32,7 @@ ART98_CLICK = _tool(
     "art98_click",
     "Move the pointer to (x, y) on the Windows 98 screen and click.",
     {"x": {"type": "integer", "minimum": 0}, "y": {"type": "integer", "minimum": 0},
-     "button": {"type": "string", "enum": ["left", "right"], "default": "left"},
+     "button": {"type": "string", "enum": ["left", "right", "middle"], "default": "left"},
      "double": {"type": "boolean", "default": False}, **SHOT_AFTER},
     ["x", "y"],
 )

@@ -8,16 +8,9 @@ import json
 import time
 from typing import Any, Callable
 
-try:
-    from . import combine as _combine
-    from . import config, history, media
-    from .desk import DeskError, NotConnected, get_desk
-except ImportError:  # Hermes may load plugin modules directly.
-    import combine as _combine  # type: ignore[no-redef]
-    import config  # type: ignore[no-redef]
-    import history  # type: ignore[no-redef]
-    import media  # type: ignore[no-redef]
-    from desk import DeskError, NotConnected, get_desk  # type: ignore[no-redef]
+from . import combine as _combine
+from . import config, history, media
+from .desk import DeskError, NotConnected, get_desk
 
 
 def _ok(**payload: Any) -> str:
@@ -89,7 +82,8 @@ def _after(result: dict, args: dict) -> Any:
 
 @_guarded
 def art98_status(args: dict) -> Any:
-    return _ok(**get_desk().status(), media=media.counts(), settings=config.load())
+    settings = {k: v for k, v in config.load().items() if k != "host_folder"}  # a host path; not for the model
+    return _ok(**get_desk().status(), media=media.counts(), settings=settings)
 
 
 @_guarded
@@ -180,30 +174,106 @@ def art98_render(args: dict) -> Any:
     if name is not None and not str(name).isidentifier():
         return _err("scene must be a class name, e.g. 'Showcase'", code="bad_arguments")
     desk = get_desk()
-    if getattr(desk, "runs_code", False):
-        guard = _approve_script(scene)
+    if not getattr(desk, "runs_code", False):
+        return _ok(**desk.render(str(scene), str(out), name))
+    if not config.load()["allow_render"]:
+        return _err("art98_render is off: it runs the scene script as Python on the Hermes machine. "
+                    "The user can turn on allow_render in the plugin settings", code="disabled")
+    with _snapshot(scene) as (copy, files):
+        guard = _approve_script(files)
         if not guard.get("approved"):
             reason = guard.get("message") or "not approved"
             return _err("art98_render runs the scene as Python, so it needs the same approval as "
                         f"execute_code, and Hermes refused it: {reason}", code="not_approved")
-    return _ok(**desk.render(str(scene), str(out), name))
+        return _ok(**desk.render(str(copy), str(out), name))
 
 
-def _approve_script(scene) -> dict:
-    """A render runs the agent's script as Python, so it takes the same approval as Hermes's own
-    execute_code: Hermes asks the user wherever it would ask for execute_code, and its policy for
-    cron and other unattended runs applies. Hermes has no public approval call for plugin tools
-    yet, so this uses execute_code's guard; if a release moves it, renders are refused rather
-    than run unasked. Outside Hermes (tests) there is nobody to ask."""
+def _imported(text: str) -> set[str]:
+    """Top-level names a script imports (absolute imports only), read with ast."""
+    import ast
+    try:
+        tree = ast.parse(text)
+    except SyntaxError:
+        return set()
+    names = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            names.update(a.name.split(".")[0] for a in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.module and not node.level:
+            names.add(node.module.split(".")[0])
+    return names
+
+
+_CODE = {".py", ".pyw", ".pyc", ".pyo", ".so", ".pth"}  # what Python could import or run
+
+
+def _has_python(folder) -> bool:
+    """True if the folder holds anything importable, or a symlink (which could lead to some)."""
+    return any(p.is_symlink() or p.suffix in _CODE for p in folder.rglob("*"))
+
+
+def _snapshot(scene):
+    """Copy the scene and every animations/ module it imports into a fresh folder, so what runs
+    is exactly what was approved (a later art98_save_scene can't swap it). Asset and state
+    folders and other files beside the scene are linked in, but only ones holding no Python;
+    anything with code is either copied (and shown) or left out."""
+    import contextlib
+    import shutil
+    import tempfile
+    from pathlib import Path
+
+    @contextlib.contextmanager
+    def run():
+        src = scene.parent
+        files: dict[str, str] = {}
+        dirs: set[str] = set()
+        todo = [scene.name]
+        while todo:
+            rel = todo.pop()
+            if rel in files:
+                continue
+            files[rel] = (src / rel).read_text(encoding="utf-8")
+            for mod in _imported(files[rel]):
+                if (src / f"{mod}.py").is_file():
+                    todo.append(f"{mod}.py")
+                elif (src / mod).is_dir() and mod not in dirs and not mod.startswith("."):
+                    dirs.add(mod)
+                    todo.extend(str(p.relative_to(src)) for p in sorted((src / mod).rglob("*.py")))
+        tmp = Path(tempfile.mkdtemp(prefix=".run-", dir=media.data_root()))
+        try:
+            for rel, text in files.items():
+                (tmp / rel).parent.mkdir(parents=True, exist_ok=True)
+                (tmp / rel).write_text(text, encoding="utf-8")
+            for entry in src.iterdir():
+                if entry.name in files or entry.name in dirs or entry.name.startswith((".", "__")):
+                    continue
+                if entry.is_dir() and not _has_python(entry):
+                    (tmp / entry.name).symlink_to(entry, target_is_directory=True)
+                elif entry.is_file() and not entry.is_symlink() and entry.suffix not in _CODE:
+                    (tmp / entry.name).symlink_to(entry)  # images, JSON and the like
+            yield tmp / scene.name, files
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+    return run()
+
+
+def _approve_script(files: dict[str, str]) -> dict:
+    """A render runs the agent's script as Python, so it goes through the guard Hermes's own
+    execute_code uses: it asks the user in gateway and ask contexts, and follows the approvals
+    settings for cron, -q and other unattended runs; local CLI/TUI/Desktop sessions get no prompt
+    from it, which is why allow_render must be on as well. It shares execute_code's approval key.
+    Hermes has no public approval call for plugin tools yet, so this imports its guard; if a
+    release moves it, renders are refused rather than run unasked."""
     try:
         from tools.approval import check_execute_code_guard
     except ImportError:
         import sys
         if "hermes_cli" not in sys.modules:
-            return {"approved": True}  # not inside Hermes
+            return {"approved": True}  # not inside Hermes (tests)
         return {"approved": False, "message": "this Hermes has no approval guard the art98 plugin "
                 "knows, so it won't run scripts; update the plugin"}
-    return check_execute_code_guard(scene.read_text(encoding="utf-8"), "local")
+    text = "\n".join(f"# ---- animations/{rel} ----\n{body}" for rel, body in files.items())
+    return check_execute_code_guard(text, "local")
 
 
 MAX_SCENE_BYTES = 256 * 1024

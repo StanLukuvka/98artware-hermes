@@ -7,7 +7,7 @@
 //   Status  [refresh] [cog]    | Video output [ live | recording ]
 //   Stored animation scripts   | (4:3, the guest is 800x600)
 //   History                    |
-// The cog opens a settings popout; settings are saved in the plugin's config.json.
+// The cog opens a settings popout; settings are saved in Hermes's config.yaml.
 (function () {
   "use strict";
 
@@ -89,9 +89,7 @@
 
   // <img>/<video> can't send the session header, so binary files come in as blobs.
   async function fetchBlobURL(path) {
-    const headers = {};
-    if (window.__HERMES_SESSION_TOKEN__) headers["X-Hermes-Session-Token"] = window.__HERMES_SESSION_TOKEN__;
-    const res = await fetch(API + path, { headers, credentials: "include" });
+    const res = await SDK.authedFetch(API + path);
     if (!res.ok) {
       let detail = res.status + " " + res.statusText;
       try { detail = (await res.json()).detail || detail; } catch (e) { /* not JSON */ }
@@ -291,6 +289,7 @@
     desktop: ["Revert to", "The desktop a revert starts from."],
     screenshot_after: ["Screenshot after actions", "Default when the agent doesn't say."],
     allow_win32: ["Allow art98_win32", "Lets the agent call Win32 functions in the guest directly."],
+    allow_render: ["Allow art98_render", "Lets the agent render its scripts: a render runs the script as Python on the Hermes machine."],
     live_interval_ms: ["Live refresh (ms)", "How often the live view asks for a new screenshot."],
     record_fps: ["Recording frame rate", "Frames per second for new recordings."],
     host_folder: ["Data folder on this PC", "The plugin's data folder (Hermes's plugin-data/art98) as your PC sees it, not the container's path. Fills in the Open in VS Code links; empty hides them."]
@@ -573,9 +572,7 @@
       const next = (ms) => { if (alive) timer = setTimeout(load, ms); };
       const load = async () => {
         try {
-          const headers = {};
-          if (window.__HERMES_SESSION_TOKEN__) headers["X-Hermes-Session-Token"] = window.__HERMES_SESSION_TOKEN__;
-          const res = await fetch(API + "/live" + (frame ? "?since=" + frame : ""), { headers, credentials: "include", cache: "no-store" });
+          const res = await SDK.authedFetch(API + "/live" + (frame ? "?since=" + frame : ""), { cache: "no-store" });
           if (!alive) return;
           const source = res.headers.get("X-Art98-Source");
           if (res.status === 204) { next(VNC_MS); return; }

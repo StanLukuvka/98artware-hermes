@@ -27,6 +27,7 @@ FIELDS: dict[str, tuple[Any, type, Any]] = {
     "desktop": ("blank", str, ("blank", "stock")),      # what a revert starts from
     "screenshot_after": (True, bool, None),             # default for the action tools
     "allow_win32": (False, bool, None),                 # art98_win32 refuses unless on
+    "allow_render": (False, bool, None),                # art98_render (runs scene Python) refuses unless on
     "live_interval_ms": (1000, int, (250, 10000)),      # dashboard live view refresh
     "record_fps": (30, int, (1, 60)),
     "host_folder": ("", str, None),                     # the data folder as the PC sees it, for VS Code links

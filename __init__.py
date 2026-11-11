@@ -2,12 +2,7 @@
 
 from pathlib import Path
 
-try:
-    from . import config, schemas, tools
-except ImportError:  # Hermes may load plugin modules directly.
-    import config  # type: ignore[no-redef]
-    import schemas  # type: ignore[no-redef]
-    import tools  # type: ignore[no-redef]
+from . import config, schemas, tools
 
 TOOLSET = "art98"
 # art98_set_state and art98_record exist in schemas.py and tools.py but aren't registered until

@@ -12,3 +12,4 @@ config.json
 # states/ ships starter files (copied to plugin-data on first use).
 states/*
 !states/*.json
+*.exe

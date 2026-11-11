@@ -1,7 +1,7 @@
 ---
 name: art98
 description: Drive a Windows 98 VM and render art98 scenes.
-version: 0.4.0
+version: 0.5.0
 author: StanLukuvka
 license: MIT
 platforms: [linux]
@@ -142,7 +142,8 @@ replace an existing file unless `overwrite` is set.
 
 ### The dashboard
 
-The user can do the same from the Hermes dashboard's art98 tab (http://127.0.0.1:9119/art98):
+The user can do the same from the Hermes dashboard's art98 tab
+(`<dashboard>/art98`, by default `http://127.0.0.1:9119/art98`):
 Render buttons per script and per scene, a History of runs with Watch and download, a Live
 view of the screen, and one message line in Status for what just happened.
 
@@ -150,9 +151,11 @@ view of the screen, and one message line in Status for what just happened.
 
 - `busy`: a render or another action holds the VM. Only one thing drives it at a time. Wait a
   few seconds and retry; don't loop fast.
-- `not_approved`: a render runs the script as Python, so Hermes asks the user first, as for
-  `execute_code`. If it was refused (or no one can approve, as in a single-query or cron run),
-  stop and tell the user. Don't render another way or change approval settings.
+- `disabled` from `art98_render`: the user hasn't turned on `allow_render`, because a render
+  runs the script as Python on their machine. Tell them; don't turn it on yourself.
+- `not_approved`: Hermes's approval for running code (the same one `execute_code` uses) refused
+  the render, or no one could approve it, as in a single-query or cron run. Stop and tell the
+  user. Don't render another way or change approval settings.
 - A render writes over an existing video of the same name. Pick a new `output` to keep the old one.
 - The VM's screen is 16-bit. A desktop colour comes out flat only when each of r, g and b is a
   multiple of 8; anything else, such as `(0, 126, 178)`, is painted as dotted lines.

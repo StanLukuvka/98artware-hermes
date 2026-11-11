@@ -1,7 +1,7 @@
 """The one seam between the Hermes tools and art98.
 
 Every tool calls a method on a Desk; get_desk() picks one from the backend setting:
-DriveDesk (drive) is the real one: it imports art98 from the read-only library mount and
+DriveDesk (drive) is the real one: it imports the art98 library bundled in vendor/ and
 attaches to the VM container over its control API. StubDesk (stub) answers NotConnected and
 DemoDesk (demo) fakes data, both for working on the plugin without a VM.
 
@@ -11,6 +11,7 @@ No imports from the rest of the plugin, so dashboard/plugin_api.py can load it b
 from __future__ import annotations
 
 import threading
+from pathlib import Path
 from typing import Any
 
 
@@ -113,8 +114,9 @@ class DemoDesk(StubDesk):
 class DriveDesk(Desk):
     """The real backend: art98's library, imported here, talks to the VM container's API.
 
-    ART98_CORE is the art98 library folder (mounted read-only) and ART98_CLIENT the folder
-    with the client art98.toml. The VM token comes from Hermes (the plugin's vm_token secret,
+    The art98 library is the copy in vendor/ (pinned with the plugin; vendor/VENDORED.md names
+    its commit). ART98_CLIENT is the folder with the client art98.toml, and ART98_GUEST_BUILD
+    (default /opt/art98/guest/build) the guest programs, which are binaries and never shipped. The VM token comes from Hermes (the plugin's vm_token secret,
     stored as ART98_VM_TOKEN), never from a file. Each action attaches (taking the VM's
     lock), acts and releases, so the desktop carries on between tool calls. A render runs
     `art98 render` in a child process so a scene's code never runs inside Hermes itself.
@@ -129,15 +131,33 @@ class DriveDesk(Desk):
         import os
         import sys
         from pathlib import Path
-        self.core = Path(os.environ.get("ART98_CORE", "/opt/art98/core"))
+        self.core = VENDOR
         self.client = Path(os.environ.get("ART98_CLIENT", "/opt/art98-client"))
-        self.activity_file = _plugin_module("media").data_root() / ".activity.json"
-        if not (self.core / "art98").is_dir():
-            raise NotConnected(f"art98 library not found at {self.core} (set ART98_CORE)")
-        if str(self.core) not in sys.path:
-            sys.path.insert(0, str(self.core))
-        from art98 import service, settings  # noqa: F401  (import check)
+        if not os.environ.get("ART98_GUEST_BUILD"):  # where art98 finds view.exe and the like
+            os.environ["ART98_GUEST_BUILD"] = "/opt/art98/guest/build"
+        if not (self.core / "art98" / "service.py").is_file():
+            raise NotConnected(f"the bundled art98 library is missing from {self.core}")
+        loaded = sys.modules.get("art98")
+        if loaded is not None and not _inside(getattr(loaded, "__file__", None), self.core):
+            raise NotConnected(f"another module named art98 is already loaded ({loaded.__file__}); "
+                               "the plugin only runs its bundled copy")
+        if loaded is None:  # check where `import art98` would land before any of it runs
+            from importlib.util import find_spec
+            if str(self.core) not in sys.path:
+                sys.path.append(str(self.core))  # appended: it never shadows Hermes's own imports
+            spec = find_spec("art98")
+            if spec is None or not _inside(spec.origin, self.core):
+                raise NotConnected(f"`import art98` would load {spec and spec.origin}, not the bundled copy")
+        import art98
+        from art98 import service, settings
+        if not _inside(art98.__file__, self.core):
+            raise NotConnected(f"`import art98` found {art98.__file__}, not the bundled copy")
         self._service, self._settings_mod = service, settings
+
+    @property
+    def activity_file(self):
+        """In the active profile's data folder (looked up each time: one process may serve several)."""
+        return _plugin_module("media").data_root() / ".activity.json"
 
     # -- plumbing ------------------------------------------------------------------
     def _settings(self):
@@ -210,7 +230,10 @@ class DriveDesk(Desk):
     def status(self) -> dict[str, Any]:
         import json
         import time
-        base = {"backend": self.name, "connected": False, "vm": "off", "activity": None}
+        # art98: the bundled library. The VM's server must come from a 98artware checkout of the
+        # same commit; the guest side is checked when a session attaches (protocol version).
+        base = {"backend": self.name, "connected": False, "vm": "off", "activity": None,
+                "art98": vendored()}
         try:
             settings = self._settings()
             reply = self._service._read_status(self._service._address(settings),
@@ -325,13 +348,22 @@ class DriveDesk(Desk):
         cmd = [sys.executable, "-c", "import sys; from art98.cli import main; sys.exit(main())",
                "render", str(animation_path), *([scene] if scene else []), "-o", str(out), "--wait", "60"]
         self._mark("render", Path(animation_path).name)
+        # Its own process group, so a timeout also stops anything the scene started.
+        child = subprocess.Popen(cmd, cwd=self.client, env=env, stdout=subprocess.PIPE,
+                                 stderr=subprocess.PIPE, text=True, start_new_session=True)
         try:
-            run = subprocess.run(cmd, cwd=self.client, env=env, capture_output=True, text=True,
-                                 timeout=self.RENDER_TIMEOUT_S)
+            stdout, stderr = child.communicate(timeout=self.RENDER_TIMEOUT_S)
         except subprocess.TimeoutExpired:
+            import signal
+            try:
+                os.killpg(child.pid, signal.SIGKILL)
+            except OSError:
+                pass
+            child.communicate()
             raise DeskError(f"render took longer than {self.RENDER_TIMEOUT_S} s", "timeout") from None
         finally:
             self._mark(None)
+        run = subprocess.CompletedProcess(cmd, child.returncode, stdout, stderr)
         if run.returncode != 0:
             lines = [l for l in (run.stderr or run.stdout).strip().splitlines() if l.strip()]
             message = next((l for l in reversed(lines) if l.startswith("error:")), lines[-1] if lines else "no output")
@@ -348,6 +380,30 @@ class DriveDesk(Desk):
         if not out.is_file():
             raise DeskError(f"render finished but wrote no {out.name}", "render_failed")
         return {"output": out.name, "bytes": out.stat().st_size}
+
+
+VENDOR = Path(__file__).resolve().parent / "vendor"  # the pinned copy of the art98 library
+
+
+def _inside(file, folder) -> bool:
+    try:
+        return file is not None and Path(file).resolve().is_relative_to(folder)
+    except (OSError, ValueError):
+        return False
+
+
+def vendored() -> dict:
+    """Which art98 the plugin carries, from vendor/VENDORED.md."""
+    info = {}
+    try:
+        for line in (VENDOR / "VENDORED.md").read_text(encoding="utf-8").splitlines():
+            if line.startswith("commit: "):
+                info["commit"] = line.removeprefix("commit: ").strip()
+            elif line.startswith("version: "):
+                info["version"] = line.removeprefix("version: ").strip()
+    except OSError:
+        pass
+    return info
 
 
 TOKEN_ENV = "ART98_VM_TOKEN"  # where Hermes keeps the plugin's vm_token secret

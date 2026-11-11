@@ -29,6 +29,7 @@ config_schema:
   desktop: {type: str, choices: [blank, stock], default: blank, label: "Revert to", description: "The desktop a revert starts from."}
   screenshot_after: {type: bool, default: true, label: "Screenshot after actions", description: "Default when the agent doesn't say."}
   allow_win32: {type: bool, default: false, label: "Allow art98_win32", description: "Lets the agent call Win32 functions in the guest directly."}
+  allow_render: {type: bool, default: false, label: "Allow art98_render", description: "Lets the agent render its scene scripts. A render runs the script as Python on the Hermes machine, outside the terminal backend; Hermes's execute_code approval also applies."}
   live_interval_ms: {type: int, default: 1000, label: "Live refresh (ms)", description: "Screenshot live view refresh, 250 to 10000. The VNC view ignores it."}
   record_fps: {type: int, default: 30, label: "Recording frame rate", description: "Frames per second for new recordings, 1 to 60."}
   host_folder: {type: str, default: "", label: "Data folder on this PC", description: "The plugin's data folder as your PC sees it, for the Open in VS Code links; empty hides them."}

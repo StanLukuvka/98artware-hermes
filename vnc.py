@@ -27,6 +27,8 @@ IDLE_S = 30.0          # stop watching when nobody has asked for a frame this lo
 MAX_FPS = 15           # how often to ask the server for an update
 CONNECT_TIMEOUT = 3.0
 RETRY_S = 5.0          # after a failed connect, wait this long before trying again
+MAX_SIDE = 2048        # the guest is at most 1024x768; refuse anything far bigger
+MAX_SKIP = 1 << 20     # longest message we read and drop (colour map, clipboard)
 ENC_RAW, ENC_DESKTOP_SIZE = 0, -223
 
 
@@ -119,7 +121,7 @@ class Watcher:
         w, h = struct.unpack(">HH", _recv(sock, 4))
         _recv(sock, 16)        # the server's pixel format; ours replaces it
         (name_len,) = struct.unpack(">I", _recv(sock, 4))
-        _recv(sock, name_len)
+        _skip(sock, name_len)
         self._resize(w, h)
         # 32 bpp, little-endian, true colour, red at bit 16: bytes arrive as B, G, R, X.
         sock.sendall(struct.pack(">BxxxBBBBHHHBBBxxx", 0, 32, 24, 0, 1, 255, 255, 255, 16, 8, 0))
@@ -134,6 +136,8 @@ class Watcher:
                 for _ in range(rects):
                     x, y, w, h, enc = struct.unpack(">HHHHi", _recv(sock, 12))
                     if enc == ENC_RAW:
+                        if x + w > self.width or y + h > self.height:
+                            raise VNCError("update rectangle outside the screen")
                         self._blit(x, y, w, h, _recv(sock, w * h * 4))
                     elif enc == ENC_DESKTOP_SIZE:
                         self._resize(w, h)
@@ -143,17 +147,19 @@ class Watcher:
                 sock.sendall(struct.pack(">BBHHHH", 3, 1, 0, 0, self.width, self.height))
             elif kind == 1:                     # SetColourMapEntries (not used in true colour)
                 _, _, n = struct.unpack(">BHH", _recv(sock, 5))
-                _recv(sock, n * 6)
+                _skip(sock, n * 6)
             elif kind == 2:                     # Bell
                 pass
             elif kind == 3:                     # ServerCutText
                 _recv(sock, 3)
                 (n,) = struct.unpack(">I", _recv(sock, 4))
-                _recv(sock, n)
+                _skip(sock, n)
             else:
                 raise VNCError(f"unexpected server message {kind}")
 
     def _resize(self, w: int, h: int) -> None:
+        if not (0 < w <= MAX_SIDE and 0 < h <= MAX_SIDE):
+            raise VNCError(f"implausible screen size {w}x{h}")
         with self._lock:
             self.width, self.height = w, h
             self._fb = bytearray(w * h * 3)
@@ -171,6 +177,12 @@ class Watcher:
                 at = (y + r) * stride + x * 3
                 self._fb[at:at + w * 3] = row
             self.version += 1
+
+
+def _skip(sock: socket.socket, n: int) -> None:
+    if n > MAX_SKIP:
+        raise VNCError(f"server message of {n} bytes is too long")
+    _recv(sock, n)
 
 
 def _png(w: int, h: int, rgb: bytes) -> bytes:

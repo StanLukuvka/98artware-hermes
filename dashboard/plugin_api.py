@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextvars
 import importlib.util
 import threading
 import time
@@ -153,7 +154,9 @@ async def render(body: dict = Body(...)):
         raise HTTPException(status_code=409, detail="a render from the dashboard is already running")
     replaces = out.exists()  # a render overwrites its own earlier video; the page says so
     try:
-        threading.Thread(target=_render_job, args=(scene_path, out, scene), daemon=True,
+        # copy_context: the job keeps this request's profile and secret scope
+        job = contextvars.copy_context()
+        threading.Thread(target=job.run, args=(_render_job, scene_path, out, scene), daemon=True,
                          name="art98-dashboard-render").start()
     except RuntimeError:
         _render_lock.release()

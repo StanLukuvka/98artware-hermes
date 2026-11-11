@@ -21,7 +21,8 @@ art98/
 ├── dashboard/           plugin_api.py: the /api/plugins/art98/... routes below
 │                        manifest.json + dist/index.js + dist/style.css: the /art98 tab
 ├── desktop/plugin.js    Hermes Desktop pane "Windows 98": status and media lists
-└── states/              starter desktop state files (.json), copied to the data folder on first use
+├── states/              starter desktop state files (.json), copied to the data folder on first use
+└── vendor/              the art98 library (art98/), its LICENSE, and VENDORED.md naming its commit
 ```
 
 What the plugin makes lives outside this folder, in Hermes's per-plugin data folder
@@ -76,33 +77,57 @@ and goes back to the stub. Actions still answer `not_connected` under `demo`.
 
 ## Requirements and behaviour
 
-What the plugin needs, and what it does beyond Hermes's own tools:
+What the plugin needs, and everything it does beyond Hermes's own tools. Linux only.
 
-- **The art98 library** (the `core/` folder of the 98artware repo), importable inside the
-  Hermes process. `desk.py` adds `ART98_CORE` (default `/opt/art98/core`) to `sys.path`.
-  Mount it read-only. No PyPI packages are needed. It needs a checkout that takes the token
-  from the host program (`Settings.token` / `ART98_TOKEN`, after art98 0.1.0).
-- **An art98 VM**, run by art98 in its own container. The plugin reaches it over two loopback
-  TCP ports: the control API (`7598`, token-authenticated) and an optional view-only VNC port
-  (`5900`, `ART98_VNC`, default `127.0.0.1:5900`). It opens no other network connections and
-  never sends input over VNC.
-- **Client settings**: a folder with art98's client `art98.toml`, `ART98_CLIENT` (default
-  `/opt/art98-client`).
-- **The VM token**, as the plugin's `vm_token` secret (stored by Hermes as `ART98_VM_TOKEN` and
-  read with `get_secret`). The plugin never reads a token file.
-- **Approval for renders**: `art98_render` runs the agent's scene script as Python, so it asks
-  through the same guard as Hermes's `execute_code`: the user approves it wherever Hermes would
-  ask for `execute_code`, and single-query, cron and other unattended runs follow their
-  `approvals` settings (by default they refuse). Hermes has no public approval call for plugin
-  tools yet, so this imports `tools.approval`; if a release moves it, renders are refused. The
-  dashboard's own Render button is the user's click and doesn't ask.
-- **Subprocesses**: `art98_render` runs `art98 render` in a child Python process, so scene
-  code never runs in the Hermes process. The child gets a small environment (`PATH`, `HOME`,
-  locale, `ART98_*` and the token), none of Hermes's keys. `art98_combine` runs `ffmpeg` and `ffprobe`, which
-  must be on `PATH`.
-- **Guest control**: the tools move the guest's mouse and type keys in the VM. `art98_win32`
-  calls any Win32 function in the guest, and refuses unless the user turns on `allow_win32`.
-- **Files**: it writes only to its data folder (`plugin_data_dir("art98")`, or `ART98_DATA`).
+- **Running agent code (`art98_render`).** A render runs the agent's scene script as Python on
+  the Hermes machine, in a child process outside Hermes's terminal backend and without a sandbox.
+  Two gates, both needed:
+  - the `allow_render` setting, off by default. Off, `art98_render` refuses with `disabled`.
+  - Hermes's `execute_code` approval guard. It asks the user in gateway (messaging) and ask
+    contexts, and follows `approvals.*` for cron, single-query (`-q`) and other unattended runs,
+    which refuse by default. It does **not** prompt in a local CLI, TUI or Desktop session, which is
+    why `allow_render` exists. It shares `execute_code`'s approval key, so "approve for this
+    session" on one covers the other. Under `plugins.isolation: host` the guard runs in the plugin
+    host and may not see a cron run's context; `allow_render` is the gate you can rely on there.
+    Hermes has no public approval call for plugin tools yet, so this imports
+    `tools.approval.check_execute_code_guard` (a validate warning); if a release moves it, renders
+    are refused.
+  - What is approved is what runs: the scene and every `animations/` module it imports are
+    copied to a temporary folder, shown together for approval, and the copy is rendered. Other
+    files (images, JSON) are linked in, and so are folders, but only ones holding no Python
+    and no symlinks.
+  - The dashboard's own Render button is the user's click: it renders with no approval.
+- **The render's environment.** The child gets `PATH`, `HOME`, the locale, `ART98_*` settings and
+  the VM token (`ART98_TOKEN`), none of Hermes's other variables. It is not a sandbox: scene
+  code can read and write whatever the Hermes user can, including files under `HOME`, and it can
+  read the VM token. A render is stopped after 15 minutes, with anything it started.
+- **The art98 library is bundled** in `vendor/art98/` (MIT, `vendor/LICENSE`), copied unchanged
+  from the 98artware repo by its `tools/vendor_to_hermes.py`, so it is pinned with the plugin;
+  `vendor/VENDORED.md` names the source commit and `art98_status` reports it. `desk.py` refuses
+  to start if another `art98` module is already loaded. Run the VM's server from a 98artware
+  checkout at that commit. The guest programs (`view.exe` and the like) are Windows binaries and
+  are never shipped: mount `98artware/guest/build` at `ART98_GUEST_BUILD` (default
+  `/opt/art98/guest/build`). No PyPI packages are needed.
+- **Network: loopback only.** The art98 VM's control API at the address in the client
+  `art98.toml` (default `127.0.0.1:7598`, token-authenticated), and optionally its view-only VNC
+  port (`ART98_VNC`, default `127.0.0.1:5900`, no password, nothing sent but frame requests).
+  No other connections, no third-party services, no telemetry, no self-update.
+- **One stored credential.** The VM token, as the plugin's `vm_token` secret, kept by Hermes as
+  `ART98_VM_TOKEN` and read with `get_secret`. The plugin never reads a token file, `.env` or
+  `auth.json`. The token goes to the control API address in the client `art98.toml`.
+- **Other subprocesses.** `art98_combine` runs `ffmpeg` and `ffprobe`, which must be on `PATH`.
+- **Background threads.** A VNC reader while the dashboard's Live tab is open (it stops after
+  30 s with no viewer), and one thread per dashboard render.
+- **Reads outside its data.** The guest programs folder (`ART98_GUEST_BUILD`) and the client
+  `art98.toml` (`ART98_CLIENT`, default `/opt/art98-client`).
+- **Writes.** Its data folder (`plugin_data_dir("art98")`, or `ART98_DATA`): recordings,
+  animations, states, screenshots, `history.jsonl`, `.activity.json` and the render copies; its
+  own settings in Hermes's `config.yaml`; a temporary folder per screenshot.
+- **Guest control.** The tools move the mouse, type and start programs inside the Windows 98 VM,
+  so the agent can already run anything in the guest. `art98_win32` (any Win32 call in the guest)
+  is off unless `allow_win32` is on; that gate is about direct API calls, not a guest sandbox.
+- **Environment variables it reads:** `ART98_GUEST_BUILD`, `ART98_CLIENT`, `ART98_VNC`, `ART98_DATA`
+  (all optional, with the defaults above).
 
 Never give the Hermes container art98's `work/` folder: it holds the Windows disk images and
 the product key the user entered.
@@ -117,7 +142,6 @@ talks to the VM container's API; no art98 command runs outside the Hermes contai
   `token_file` outside `work/`. `art98 vm start` run from that folder publishes the control
   API on `127.0.0.1:7598` only; add `--vnc` for the live view on `127.0.0.1:5900`.
 - **Hermes side.** Give the Hermes container:
-  - `<98artware>/core` read-only at `/opt/art98/core`,
   - `<98artware>/guest/build` (the guest programs, e.g. `view.exe` for picture windows)
     read-only at `/opt/art98/guest/build`,
   - the client folder (the client `art98.toml`) at `/opt/art98-client`,
@@ -142,8 +166,9 @@ talks to the VM container's API; no art98 command runs outside the Hermes contai
 1. Install: `hermes plugins install StanLukuvka/98artware-hermes --enable`, or for a local
    checkout link it as `~/.hermes/plugins/art98` (the link's name is the plugin id) and run
    `hermes plugins enable art98`.
-2. Web dashboard: `hermes dashboard`, then http://127.0.0.1:9119/art98. Open the cog, set
-   `backend` to `drive`, and restart the dashboard after the plugin's first install.
+2. Web dashboard: `hermes dashboard`, then `<dashboard>/art98` (by default
+   `http://127.0.0.1:9119/art98`). Open the cog, set `backend` to `drive`, and restart
+   the dashboard after the plugin's first install.
 3. Desktop half: Hermes Desktop → Settings → Plugins → turn on "art98 (Windows 98)".
    ⌘K → Reload desktop plugins if it doesn't show.
 

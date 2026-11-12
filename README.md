@@ -83,19 +83,30 @@ What the plugin needs, and everything it does beyond Hermes's own tools. Linux o
   the Hermes machine, in a child process outside Hermes's terminal backend and without a sandbox.
   Two gates, both needed:
   - the `allow_render` setting, off by default. Off, `art98_render` refuses with `disabled`.
-  - Hermes's `execute_code` approval guard. It asks the user in gateway (messaging) and ask
-    contexts, and follows `approvals.*` for cron, single-query (`-q`) and other unattended runs,
-    which refuse by default. It does **not** prompt in a local CLI, TUI or Desktop session, which is
-    why `allow_render` exists. It shares `execute_code`'s approval key, so "approve for this
-    session" on one covers the other. Under `plugins.isolation: host` the guard runs in the plugin
-    host and may not see a cron run's context; `allow_render` is the gate you can rely on there.
-    Hermes has no public approval call for plugin tools yet, so this imports
-    `tools.approval.check_execute_code_guard` (a validate warning); if a release moves it, renders
-    are refused.
-  - What is approved is what runs: the scene and every `animations/` module it imports are
-    copied to a temporary folder, shown together for approval, and the copy is rendered. Other
-    files (images, JSON) are linked in, and so are folders, but only ones holding no Python
-    and no symlinks.
+  - Hermes's approval for that render. The plugin's `pre_tool_call` hook sends every
+    `art98_render` that would run Python to Hermes's human-approval gate, naming the scripts and
+    the sha256 of the scene and the `animations/` modules it imports. The gate follows Hermes's
+    approval settings: in an interactive session (CLI, TUI, Desktop, gateway) it asks the user;
+    where nobody can answer it refuses, unless the matching setting says otherwise
+    (`approvals.single_query_mode` for `-q`, `approvals.cron_mode` for cron,
+    `approvals.unattended_mode` for unattended platforms, all `deny` by default). `--yolo` and
+    `approvals.mode: off` approve without asking. "This session" and "Always" cover only that
+    exact script content (the approval key is `art98_render:<sha256>`), and "Always" is kept by
+    Hermes for every session: content approved that way also renders unasked in `-q`, cron and
+    unattended runs, whatever their `approvals.*_mode`. Refused, the render
+    answers `not_approved`, and the `post_tool_call` hook takes back what it asked for (also
+    when the call is cancelled or times out). Hermes uses the first plugin's approval request for
+    a call, so another plugin that also asks for approval of `art98_render` with a broader rule
+    would decide what "Always" covers.
+  - What is approved is what runs, for the Python the plugin can see: the scene and the
+    `animations/` modules it imports are hashed for the approval, then copied to a temporary
+    folder and hashed again, and the copy is rendered only if the two match an approval that
+    wasn't refused (each approval is used once, and lapses about a minute after Hermes's approval timeout).
+    Other files beside the scene (images, JSON) and folders holding no Python and no symlinks
+    are linked in, not copied or hashed: a scene that runs their contents, for example with
+    `exec(open(...).read())` or a dynamic import, runs content the approval didn't cover, and
+    that content can change after approval. Approvals live in memory, so a restart of Hermes or
+    its plugin host between the prompt and the render refuses it.
   - The dashboard's own Render button is the user's click: it renders with no approval.
 - **The render's environment.** The child gets `PATH`, `HOME`, the locale, `ART98_*` settings and
   the VM token (`ART98_TOKEN`), none of Hermes's other variables. It is not a sandbox: scene

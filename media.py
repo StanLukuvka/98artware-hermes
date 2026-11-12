@@ -65,7 +65,8 @@ def listing(kind: str) -> list[dict]:
 
 def resolve(kind: str, name: str) -> Path:
     """A file inside one media folder; names with a path in them are refused."""
-    if not name or "\x00" in name or Path(name).name != name or name.startswith("."):
+    if (not name or Path(name).name != name or name.startswith(".")
+            or any(ord(c) < 32 or ord(c) == 127 for c in name)):  # also keeps names one line
         raise ValueError(f"bad file name {name!r}")
     return folder(kind) / name
 

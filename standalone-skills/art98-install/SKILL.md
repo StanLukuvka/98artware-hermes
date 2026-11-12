@@ -97,7 +97,8 @@ First find out where Hermes runs. Use `terminal` to run `docker version` and `he
    to the plugin's data folder as the host sees it (`<HERMES_HOME>/plugin-data/art98` on the host side), so the VS Code links work. Restart the dashboard after the plugin's first install.
    Rendering is off until the user turns on `allow_render`: a render runs the agent's script as
    Python on the Hermes machine, outside the terminal backend. Explain that and let the user
-   decide; don't turn it on for them.
+   decide; don't turn it on for them. With it on, each render still goes through Hermes's
+   approval gate.
 8. **Give it the token.** The user pastes the contents of the VM's token file into the plugin's
    `vm_token` setting (Hermes Desktop → Settings → Plugins → art98), or adds
    `ART98_VM_TOKEN=<token>` to Hermes's `.env` and restarts Hermes. Don't read or copy the token

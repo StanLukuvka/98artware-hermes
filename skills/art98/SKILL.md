@@ -153,9 +153,10 @@ view of the screen, and one message line in Status for what just happened.
   few seconds and retry; don't loop fast.
 - `disabled` from `art98_render`: the user hasn't turned on `allow_render`, because a render
   runs the script as Python on their machine. Tell them; don't turn it on yourself.
-- `not_approved`: Hermes's approval for running code (the same one `execute_code` uses) refused
-  the render, or no one could approve it, as in a single-query or cron run. Stop and tell the
-  user. Don't render another way or change approval settings.
+- `not_approved`: each render goes through Hermes's approval gate, because it runs your script
+  as Python. They declined, no one could answer (a single-query or cron run), or the script changed
+  after it was approved. Stop and tell the user. Don't render another way or change approval
+  settings.
 - A render writes over an existing video of the same name. Pick a new `output` to keep the old one.
 - The VM's screen is 16-bit. A desktop colour comes out flat only when each of r, g and b is a
   multiple of 8; anything else, such as `(0, 126, 178)`, is painted as dotted lines.

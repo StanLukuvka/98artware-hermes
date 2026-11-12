@@ -5,7 +5,9 @@ from __future__ import annotations
 
 import base64
 import json
+import threading
 import time
+from pathlib import Path
 from typing import Any, Callable
 
 from . import combine as _combine
@@ -30,9 +32,9 @@ def _with_image(text: dict, png: bytes) -> dict:
             "text_summary": summary}
 
 
-def _run(fn: Callable[[dict], Any], args: dict) -> Any:
+def _run(fn: Callable[..., Any], args: dict, **kwargs: Any) -> Any:
     try:
-        return fn(args)
+        return fn(args, **kwargs)
     except NotConnected as e:
         return _err(str(e), code="not_connected", backend=get_desk().name)
     except DeskError as e:
@@ -60,7 +62,10 @@ def _guarded(fn: Callable[[dict], Any]) -> Callable[..., Any]:
         if not isinstance(args, dict):
             return _err("arguments must be an object", code="bad_arguments")
         start = time.monotonic()
-        result = _run(fn, args)
+        if fn.__name__ == "art98_render":  # its approval is per session (see pre_tool_call)
+            result = _run(fn, args, session_id=str(kwargs.get("session_id") or ""))
+        else:
+            result = _run(fn, args)
         if fn.__name__ == "art98_render":
             try:  # history is best-effort: a failure here never turns into a raised tool call
                 ok, code, message = _outcome(result)
@@ -163,7 +168,7 @@ def art98_record(args: dict) -> Any:
 
 
 @_guarded
-def art98_render(args: dict) -> Any:
+def art98_render(args: dict, session_id: str = "") -> Any:
     scene = media.resolve("animations", str(args["animation"]))
     if not scene.is_file():
         return _err(f"no animation {scene.name!r} in animations/", code="not_found")
@@ -180,11 +185,10 @@ def art98_render(args: dict) -> Any:
         return _err("art98_render is off: it runs the scene script as Python on the Hermes machine. "
                     "The user can turn on allow_render in the plugin settings", code="disabled")
     with _snapshot(scene) as (copy, files):
-        guard = _approve_script(files)
-        if not guard.get("approved"):
-            reason = guard.get("message") or "not approved"
-            return _err("art98_render runs the scene as Python, so it needs the same approval as "
-                        f"execute_code, and Hermes refused it: {reason}", code="not_approved")
+        if not _take_approval(session_id, scene, _digest(files)):
+            return _err("art98_render runs the scene as Python, so the user approves each render, and "
+                        "this one wasn't approved (declined, nobody there to ask, or the script "
+                        "changed after it was approved)", code="not_approved")
         return _ok(**desk.render(str(copy), str(out), name))
 
 
@@ -225,20 +229,7 @@ def _snapshot(scene):
     @contextlib.contextmanager
     def run():
         src = scene.parent
-        files: dict[str, str] = {}
-        dirs: set[str] = set()
-        todo = [scene.name]
-        while todo:
-            rel = todo.pop()
-            if rel in files:
-                continue
-            files[rel] = (src / rel).read_text(encoding="utf-8")
-            for mod in _imported(files[rel]):
-                if (src / f"{mod}.py").is_file():
-                    todo.append(f"{mod}.py")
-                elif (src / mod).is_dir() and mod not in dirs and not mod.startswith("."):
-                    dirs.add(mod)
-                    todo.extend(str(p.relative_to(src)) for p in sorted((src / mod).rglob("*.py")))
+        files, dirs = _collect(scene)
         tmp = Path(tempfile.mkdtemp(prefix=".run-", dir=media.data_root()))
         try:
             for rel, text in files.items():
@@ -257,23 +248,161 @@ def _snapshot(scene):
     return run()
 
 
-def _approve_script(files: dict[str, str]) -> dict:
-    """A render runs the agent's script as Python, so it goes through the guard Hermes's own
-    execute_code uses: it asks the user in gateway and ask contexts, and follows the approvals
-    settings for cron, -q and other unattended runs; local CLI/TUI/Desktop sessions get no prompt
-    from it, which is why allow_render must be on as well. It shares execute_code's approval key.
-    Hermes has no public approval call for plugin tools yet, so this imports its guard; if a
-    release moves it, renders are refused rather than run unasked."""
+def _collect(scene) -> tuple[dict[str, str], set[str]]:
+    """The scene and every animations/ module or package it imports: {relative path: text}, and
+    the package folders among them."""
+    src = scene.parent
+    files: dict[str, str] = {}
+    dirs: set[str] = set()
+    todo = [scene.name]
+    while todo:
+        rel = todo.pop()
+        if rel in files:
+            continue
+        files[rel] = (src / rel).read_text(encoding="utf-8")
+        for mod in _imported(files[rel]):
+            if (src / f"{mod}.py").is_file():
+                todo.append(f"{mod}.py")
+            elif (src / mod).is_dir() and mod not in dirs and not mod.startswith("."):
+                dirs.add(mod)
+                todo.extend(str(p.relative_to(src)) for p in sorted((src / mod).rglob("*.py")))
+    return files, dirs
+
+
+def _digest(files: dict[str, str]) -> str:
+    """sha256 of the scene and the animations/ modules it imports (the Python that gets copied;
+    data files beside it are linked, not hashed)."""
+    import hashlib
+    h = hashlib.sha256()
+    for rel in sorted(files):
+        for part in (rel, files[rel]):
+            data = part.encode("utf-8")
+            h.update(len(data).to_bytes(8, "big") + data)
+    return h.hexdigest()
+
+
+# Renders the pre_tool_call hook sent to Hermes's approval gate, waiting for their art98_render
+# call: (session, scene path, sha256) -> times asked. The hook runs before the user answers, so
+# post_tool_call takes back any whose call didn't go through (denied, nobody there, cancelled), and the
+# rest lapse soon after the gate's own timeout. The hook and the handler run in the same process
+# (Hermes, or its plugin host), so this is plain memory: a restart in between refuses the render.
+_approvals: dict[tuple[str, str, str], list[float]] = {}
+_asked_by_call: dict[str, tuple[str, str, str]] = {}  # tool_call_id -> its key
+_approvals_lock = threading.Lock()
+
+
+def _approval_ttl() -> float:
+    """approvals.timeout (how long Hermes waits for an answer, 300 s by default) plus a minute."""
     try:
-        from tools.approval import check_execute_code_guard
-    except ImportError:
-        import sys
-        if "hermes_cli" not in sys.modules:
-            return {"approved": True}  # not inside Hermes (tests)
-        return {"approved": False, "message": "this Hermes has no approval guard the art98 plugin "
-                "knows, so it won't run scripts; update the plugin"}
-    text = "\n".join(f"# ---- animations/{rel} ----\n{body}" for rel, body in files.items())
-    return check_execute_code_guard(text, "local")
+        from hermes_cli.config import load_config_readonly
+        timeout = int(((load_config_readonly() or {}).get("approvals") or {}).get("timeout", 300))
+    except Exception:  # noqa: BLE001
+        timeout = 300
+    return max(timeout, 30) + 60
+
+
+def _drop_stale(now: float, ttl: float) -> None:
+    for key in list(_approvals):
+        _approvals[key] = [t for t in _approvals[key] if now - t < ttl]
+        if not _approvals[key]:
+            del _approvals[key]
+    for call, key in list(_asked_by_call.items()):
+        if key not in _approvals:
+            del _asked_by_call[call]
+
+
+def _take_approval(session_id: str, scene, digest: str) -> bool:
+    """True once per approval the hook asked for with this exact digest and Hermes didn't block.
+    Outside Hermes (tests, demo.py) there is no gate and nothing to wait for."""
+    import sys
+    import time
+    if "hermes_cli" not in sys.modules:
+        return True
+    key = (session_id or "", str(scene), digest)
+    ttl = _approval_ttl()
+    with _approvals_lock:
+        _drop_stale(time.monotonic(), ttl)
+        asked = _approvals.get(key)
+        if not asked:
+            return False
+        asked.pop(0)
+        if not asked:
+            del _approvals[key]
+        return True
+
+
+def pre_tool_call(tool_name: str = "", args: dict | None = None, session_id: str = "",
+                  tool_call_id: str = "", **_: Any):
+    """Hermes pre_tool_call hook: send every art98_render that would run Python to Hermes's
+    human-approval gate, naming the scripts and the sha256 of the scene and the animations/
+    modules it imports. The gate follows Hermes's approval settings (it asks the user, or refuses
+    when nobody can answer, unless approvals say otherwise). The handler hashes its snapshot again
+    and refuses unless it matches an approval that wasn't blocked."""
+    import time
+    if tool_name != "art98_render" or not isinstance(args, dict):
+        return None
+    try:
+        if not getattr(get_desk(), "runs_code", False) or not config.load()["allow_render"]:
+            return None  # nothing runs: the stand-in backends, or the handler refuses with disabled
+        scene = media.resolve("animations", str(args.get("animation", "")))
+        if not scene.is_file():
+            return None  # the handler answers not_found
+        media.resolve("recordings", str(args.get("output", "")))
+        if Path(str(args.get("output", ""))).suffix.lower() not in (".mp4", ".gif"):
+            return None  # the handler answers bad_arguments
+        name = args.get("scene") or None
+        if name is not None and not str(name).isidentifier():
+            return None  # likewise
+        files, _ = _collect(scene)
+    except Exception:  # noqa: BLE001  (bad arguments: the handler reports them, and refuses to run)
+        return None
+    digest = _digest(files)
+    key = (session_id or "", str(scene), digest)
+    ttl = _approval_ttl()
+    with _approvals_lock:
+        now = time.monotonic()
+        _drop_stale(now, ttl)
+        _approvals.setdefault(key, []).append(now)
+        if tool_call_id:
+            _asked_by_call[tool_call_id] = key
+    return {"action": "approve", "message": _approval_message(scene.name, files, digest),
+            "rule_key": f"art98_render:{digest}"}
+
+
+def _approval_message(scene_rel: str, files: dict[str, str], digest: str) -> str:
+    """The text under Hermes's approval prompt. Hermes wraps it at about 64 columns and shows at
+    most 10 rows, cutting from the end, so: the risk first, at most 3 file names, the scope its
+    option labels can't state, and the hash last on a row of its own."""
+    rels = [scene_rel] + sorted(rel for rel in files if rel != scene_rel)
+    shown = ", ".join(f"animations/{rel}" for rel in rels[:3])
+    more = f" +{len(rels) - 3} more" if len(rels) > 3 else ""
+    return "\n".join([
+        "Runs agent-written Python on the Hermes machine, with your file",
+        "access and the VM token; Hermes's command checks don't apply.",
+        f"Files: {shown}{more}",
+        '"Session"/"permanent" cover only this exact content; editing',
+        'these files asks again. "Permanent" also runs it unprompted',
+        "in cron, -q and other unattended runs.",
+        "sha256 of these files:",
+        digest,
+    ])
+
+
+_TAKE_BACK = {"blocked", "cancelled", "timeout"}  # an extra take-back can only refuse, never run
+
+
+def post_tool_call(tool_name: str = "", tool_call_id: str = "", status: str | None = None, **_: Any):
+    """Hermes post_tool_call hook: take back the approval an art98_render asked for when the call
+    didn't go through (blocked by the gate, cancelled or timed out while the prompt was open)."""
+    if tool_name != "art98_render" or not tool_call_id:
+        return None
+    with _approvals_lock:
+        key = _asked_by_call.pop(tool_call_id, None)
+        if key is not None and status in _TAKE_BACK and _approvals.get(key):
+            _approvals[key].pop()
+            if not _approvals[key]:
+                del _approvals[key]
+    return None
 
 
 MAX_SCENE_BYTES = 256 * 1024

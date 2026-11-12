@@ -289,7 +289,7 @@
     desktop: ["Revert to", "The desktop a revert starts from."],
     screenshot_after: ["Screenshot after actions", "Default when the agent doesn't say."],
     allow_win32: ["Allow art98_win32", "Lets the agent call Win32 functions in the guest directly."],
-    allow_render: ["Allow art98_render", "Lets the agent render its scripts: a render runs the script as Python on the Hermes machine."],
+    allow_render: ["Allow art98_render", "Lets the agent render its scripts: a render runs the script as Python on the Hermes machine, and Hermes's approval gate applies to each render (see the README)."],
     live_interval_ms: ["Live refresh (ms)", "How often the live view asks for a new screenshot."],
     record_fps: ["Recording frame rate", "Frames per second for new recordings."],
     host_folder: ["Data folder on this PC", "The plugin's data folder (Hermes's plugin-data/art98) as your PC sees it, not the container's path. Fills in the Open in VS Code links; empty hides them."]

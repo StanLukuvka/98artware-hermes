@@ -28,4 +28,7 @@ def register(ctx) -> None:
     config.bind(ctx)
     for name, schema, handler in TOOLS:
         ctx.register_tool(name=name, toolset=TOOLSET, schema=schema, handler=handler, emoji="🪟")
+    # art98_render runs the agent's scene as Python: this sends each render to Hermes's approval gate.
+    ctx.register_hook("pre_tool_call", tools.pre_tool_call)
+    ctx.register_hook("post_tool_call", tools.post_tool_call)  # takes back blocked approvals
     ctx.register_skill("art98", Path(__file__).parent / "skills" / "art98" / "SKILL.md")

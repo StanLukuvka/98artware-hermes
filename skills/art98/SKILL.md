@@ -1,7 +1,7 @@
 ---
 name: art98
 description: Drive a Windows 98 VM and render art98 scenes.
-version: 0.5.0
+version: 0.6.0
 author: StanLukuvka
 license: MIT
 platforms: [linux]
@@ -99,6 +99,13 @@ class Hello(Scene):
   `telephone`, `cd`, `globe`, `flag`. `buttons` is `ok`, `okcancel`, `yesno` and so on. `size`
   can't be smaller than the stock box. Give every box in a group the same icon: a box with no
   icon puts its text in a different place.
+- `Win.from_state(window)` builds the prop for one window of a state file (what `set_state` does
+  for each window). A window prop also has `maximize()`, `minimize()` and `restore()`, which act
+  like the title-bar buttons.
+- `box.remove()` closes a `Dialog`. A box with no Cancel button (`yesno`, `abortretryignore`)
+  ignores a plain close, so `remove` answers it No or Abort instead.
+- `output_fps` is the video's frame rate. Older scripts that set `fps` still run, but write
+  `output_fps` in new ones; setting both to different values is an error.
 - `self.add(x)` shows a thing at once, `self.play(x)` runs an action, `self.pause(s)` holds.
 - The screen is 800x600. Keep `at` plus `size` inside it.
 
@@ -127,6 +134,12 @@ Path("/opt/data/plugin-data/art98/animations/hello.py").write_text(src, encoding
 5. To start from a saved desktop, put `self.set_state(...)` at the top of the scene.
 
 ### Fixing a failed render
+
+Errors art98 raises on purpose are `UsageError` (a wrong argument),
+`NotFound` (a window id, menu label or child that isn't there), `GuestError` (the guest did
+something unexpected, so the step failed), `MissingFile` (all in `art98.errors`) and `StateError` (a bad state file, in `art98.state`).
+They are still `ValueError`, `KeyError`, `RuntimeError` or `FileNotFoundError` underneath, so
+`except` on those works too. The message says what to change.
 
 A failed render answers `render_failed` with the error and the scene's line, such as
 `NameError: ... (intro.py:18, in construct)`. Read the script with `read_file`, fix that line, save the

@@ -87,7 +87,7 @@ def _product_key(args) -> str | None:
 
 
 def cmd_setup(args) -> int:
-    from art98_setup.builder import Setup
+    from art98_setup.builder import DISK_MB, Setup
 
     key = _product_key(args)
     work = load(work=args.work).work_dir
@@ -96,7 +96,7 @@ def cmd_setup(args) -> int:
         guest_build=guest_build(),
         iso=args.iso,
         product_key=key,
-        disk_mb=args.disk_mb,
+        disk_mb=DISK_MB if args.disk_mb is None else args.disk_mb,
         watch=args.watch or bool(os.environ.get(VNC_ENV)),
     )
     tool.run(args.from_stage)
@@ -215,13 +215,14 @@ def cmd_serve(args) -> int:
 
 
 def cmd_up(args) -> int:
+    from art98_setup.builder import DISK_MB
     from art98_setup.up import up
 
     return up(
         args.work,
         iso=args.iso,
         rebuild=args.rebuild,
-        disk_mb=args.disk_mb,
+        disk_mb=DISK_MB if args.disk_mb is None else args.disk_mb,
     )
 
 
@@ -269,8 +270,6 @@ def _wait_option(command) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
-    from art98_setup.builder import DISK_MB
-
     parser = argparse.ArgumentParser(prog="art98")
     commands = parser.add_subparsers(dest="command", required=True)
 
@@ -288,7 +287,10 @@ def main(argv: list[str] | None = None) -> int:
         help="folder for the prepared image (default: [vm] work from art98.toml)",
     )
     command.add_argument(
-        "--disk-mb", type=int, default=DISK_MB, help="virtual disk size in MB"
+        "--disk-mb",
+        type=int,
+        default=None,
+        help="virtual disk size in MB (default: the setup default)",
     )
     command.add_argument(
         "--from",
@@ -365,7 +367,10 @@ def main(argv: list[str] | None = None) -> int:
         "--rebuild", action="store_true", help="rebuild the container image"
     )
     command.add_argument(
-        "--disk-mb", type=int, default=DISK_MB, help="virtual disk size in MB"
+        "--disk-mb",
+        type=int,
+        default=None,
+        help="virtual disk size in MB (default: the setup default)",
     )
     command.set_defaults(run=_guarded(cmd_up, extra=(FileNotFoundError,)))
 

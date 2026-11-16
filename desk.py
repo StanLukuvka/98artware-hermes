@@ -386,14 +386,8 @@ class DriveDesk(Desk):
         return {"output": out.name, "bytes": out.stat().st_size}
 
 
-# The render child: `art98 render`. cli.main imports art98_setup (the image builder, not vendored:
-# only core/art98 is) just for a --disk-mb default of `art98 setup`, which a render never runs, so
-# a stand-in module answers that one import.
-RENDER_CHILD = """import sys, types
-if 'art98_setup' not in sys.modules:
-    builder = types.ModuleType('art98_setup.builder'); builder.DISK_MB = 0
-    package = types.ModuleType('art98_setup'); package.builder = builder
-    sys.modules.update({'art98_setup': package, 'art98_setup.builder': builder})
+# The render child: `art98 render`.
+RENDER_CHILD = """import sys
 from art98.cli import main
 sys.exit(main())"""
 

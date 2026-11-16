@@ -135,7 +135,7 @@ class DriveDesk(Desk):
         self.client = Path(os.environ.get("ART98_CLIENT", "/opt/art98-client"))
         if not os.environ.get("ART98_GUEST_BUILD"):  # where art98 finds view.exe and the like
             os.environ["ART98_GUEST_BUILD"] = "/opt/art98/guest/build"
-        if not (self.core / "art98" / "service.py").is_file():
+        if not (self.core / "art98" / "container" / "service.py").is_file():
             raise NotConnected(f"the bundled art98 library is missing from {self.core}")
         loaded = sys.modules.get("art98")
         if loaded is not None and not _inside(getattr(loaded, "__file__", None), self.core):
@@ -149,7 +149,8 @@ class DriveDesk(Desk):
             if spec is None or not _inside(spec.origin, self.core):
                 raise NotConnected(f"`import art98` would load {spec and spec.origin}, not the bundled copy")
         import art98
-        from art98 import service, settings
+        from art98 import settings
+        from art98.container import service
         if not _inside(art98.__file__, self.core):
             raise NotConnected(f"`import art98` found {art98.__file__}, not the bundled copy")
         self._service, self._settings_mod = service, settings
@@ -165,7 +166,9 @@ class DriveDesk(Desk):
         path = st.find(self.client)
         if path is None:
             raise NotConnected(f"no art98.toml in {self.client} (set ART98_CLIENT)")
-        return st.Settings(**st._read(path), source=path, root=path.parent, token=self._token())
+        # No public reader of one given art98.toml exists (settings.load() reads the cwd's),
+        # so settings._read is the one private name used here.
+        return st.Settings(**st._read(path), root=path.parent, token=self._token())
 
     @staticmethod
     def _token() -> str:
@@ -236,12 +239,13 @@ class DriveDesk(Desk):
                 "art98": vendored()}
         try:
             settings = self._settings()
-            reply = self._service._read_status(self._service._address(settings),
-                                                self._service._token(settings) or "", timeout=2.0)
+            reply = self._service.status(settings)  # the socket's facts; takes no lock
         except NotConnected as e:
             return {**base, "vm": "none", "note": str(e)}
-        except Exception as e:  # NotRunning, Unhealthy, a bad token...
+        except Exception as e:  # Unhealthy (a bad token...)
             return {**base, "note": str(e)}
+        if not reply["running"]:
+            return {**base, "note": "the VM is not running; run `art98 vm start`"}
         busy = bool(reply.get("busy"))
         activity = None
         if busy:
@@ -267,7 +271,7 @@ class DriveDesk(Desk):
             session.close()
 
     def click(self, x, y, button="left", double=False):
-        from art98.win32 import mouse_button
+        from art98.guest.win32 import mouse_button
         if button not in ("left", "right", "middle"):
             raise ValueError("button must be left, right or middle")
         with self._session("click") as s:
@@ -341,11 +345,11 @@ class DriveDesk(Desk):
         out = Path(out_path)
         settings = self._settings()
         # A small environment: the scene is the agent's code, so it gets none of Hermes's keys.
-        keep = ("PATH", "HOME", "LANG", "LC_ALL", "TZ", "TMPDIR")
+        keep = ("PATH", "HOME", "LANG", "LC_ALL", "TZ", "TMPDIR", "XDG_RUNTIME_DIR")  # the last: where art98 puts the VM socket
         env = {k: os.environ[k] for k in keep if k in os.environ}
         env.update({k: v for k, v in os.environ.items() if k.startswith("ART98_") and k != TOKEN_ENV})
         env.update(PYTHONPATH=str(self.core), ART98_TOKEN=settings.token)
-        cmd = [sys.executable, "-c", "import sys; from art98.cli import main; sys.exit(main())",
+        cmd = [sys.executable, "-c", RENDER_CHILD,
                "render", str(animation_path), *([scene] if scene else []), "-o", str(out), "--wait", "60"]
         self._mark("render", Path(animation_path).name)
         # Its own process group, so a timeout also stops anything the scene started.
@@ -381,6 +385,17 @@ class DriveDesk(Desk):
             raise DeskError(f"render finished but wrote no {out.name}", "render_failed")
         return {"output": out.name, "bytes": out.stat().st_size}
 
+
+# The render child: `art98 render`. cli.main imports art98_setup (the image builder, not vendored:
+# only core/art98 is) just for a --disk-mb default of `art98 setup`, which a render never runs, so
+# a stand-in module answers that one import.
+RENDER_CHILD = """import sys, types
+if 'art98_setup' not in sys.modules:
+    builder = types.ModuleType('art98_setup.builder'); builder.DISK_MB = 0
+    package = types.ModuleType('art98_setup'); package.builder = builder
+    sys.modules.update({'art98_setup': package, 'art98_setup.builder': builder})
+from art98.cli import main
+sys.exit(main())"""
 
 VENDOR = Path(__file__).resolve().parent / "vendor"  # the pinned copy of the art98 library
 

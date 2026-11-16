@@ -35,6 +35,9 @@ import threading
 import time
 from pathlib import Path
 
+from art98.errors import Art98Error
+from art98.guest.bridge import READY_TIMEOUT
+from art98.guest.qemu import HOLD_MS
 from art98.settings import CONTAINER_CONTROL_PORT, CONTAINER_VNC_PORT
 
 PORT = CONTAINER_CONTROL_PORT
@@ -78,7 +81,7 @@ def read_line(sock: socket.socket, limit: int = MAX_LINE) -> bytes:
     raise ConnectionError("handshake line too long")
 
 
-class ControlError(RuntimeError):
+class ControlError(Art98Error, RuntimeError):
     pass
 
 
@@ -89,7 +92,7 @@ class DesyncError(ControlError):
 class Server:
     """Answers the host on one listening socket until stopped or the VM dies.
 
-    vm is anything with the VM methods used here (a real art98.qemu.VM in the
+    vm is anything with the VM methods used here (a real art98.guest.qemu.VM in the
     container, a fake in tests); serial_path is the guest's COM1 socket.
     """
 
@@ -421,7 +424,7 @@ class Server:
                     isinstance(k, str) for k in keys
                 ):
                     raise ControlError("keys is a list of QEMU key names")
-                self.vm.send_keys(*keys, hold_ms=int(request.get("hold_ms", 80)))
+                self.vm.send_keys(*keys, hold_ms=int(request.get("hold_ms", HOLD_MS)))
             elif op == "revert":
                 self.vm.eject_disc()  # the CD medium is host state; loadvm does not restore it
                 self.vm.load_snapshot(str(request.get("snapshot", "ready")))
@@ -461,12 +464,12 @@ def run(
     port: int = PORT,
     token_file: Path | str | None = None,
     vnc: bool = False,
-    ready_timeout: float = 60.0,
+    ready_timeout: float = READY_TIMEOUT,
     unix: Path | str | None = None,
 ) -> int:
     """Boot the stage and serve it. Used by `art98 serve` inside the container."""
-    from art98.bridge import Bridge
-    from art98.qemu import VM, VMConfig
+    from art98.guest.bridge import Bridge
+    from art98.guest.qemu import VM, VMConfig
     from art98.session import IMAGE_FILE, SNAPSHOT, private_stage
 
     token = read_token(token_file)

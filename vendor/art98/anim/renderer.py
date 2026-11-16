@@ -5,13 +5,13 @@ from __future__ import annotations
 import os
 import re
 import shutil
-import sys
 import tempfile
+import warnings
 from pathlib import Path
 
-from ..recorder import (
-    GIF_COLORS,
-    GIF_FPS,
+from ..errors import UsageError
+from ..output.gif import GifOptions, write_gif
+from ..output.recorder import (
     H264,
     LOSSLESS_SUFFIX,
     RecorderError,
@@ -20,33 +20,7 @@ from ..recorder import (
     run_ffmpeg,
 )
 
-
-def write_gif(
-    source: Path | str,
-    output: Path | str,
-    fps: int = GIF_FPS,
-    colors: int = GIF_COLORS,
-    scale: float = 1.0,
-    dither: str = "none",
-    stage: bool = False,
-) -> Path:
-    """Convert a video to a GIF with its own palette, keeping pixels sharp.
-
-    With stage, the GIF is left as `part_path(output)` for the caller to rename.
-    """
-    size = "" if scale == 1 else f"scale=iw*{scale}:ih*{scale}:flags=neighbor,"
-    graph = (
-        f"fps={fps},{size}split[a][b];"
-        f"[a]palettegen=max_colors={colors}:stats_mode=diff[palette];"
-        f"[b][palette]paletteuse=dither={dither}:diff_mode=rectangle"
-    )
-    run_ffmpeg(
-        ["-i", str(source), "-filter_complex", graph, "-loop", "0"],
-        Path(output),
-        "making the GIF",
-        stage,
-    )
-    return Path(output)
+OUTPUT_SUFFIXES = (".mp4", ".gif")
 
 
 def render(
@@ -55,10 +29,7 @@ def render(
     *,
     session,
     gif: Path | str | None = None,
-    gif_fps: int = GIF_FPS,
-    gif_colors: int = GIF_COLORS,
-    gif_scale: float = 1.0,
-    gif_dither: str = "none",
+    gif_options: GifOptions | None = None,
     keep_clips: bool = True,
 ) -> Path:
     """Play a scene on `session` and write the video.
@@ -77,25 +48,29 @@ def render(
     has worked. A render that fails deletes its own part files and touches
     nothing an earlier render left, the output and its clips included.
     Numbered clips left beside the output by an earlier render with more cuts
-    are never deleted: a warning on stderr names them.
+    are never deleted: a `warnings.warn` names them.
     """
-    require_ffmpeg()
     scene = scene() if isinstance(scene, type) else scene
     output = Path(output or f"{type(scene).__name__}.mp4")
+    if output.suffix not in OUTPUT_SUFFIXES:
+        raise UsageError(f"output {output.name} must end in .mp4 or .gif")
+    if gif is not None and Path(gif).suffix != ".gif":
+        raise UsageError(f"gif {Path(gif).name} must end in .gif")
+    require_ffmpeg()
     if output.suffix == ".gif":
         gif, output = output, None
     temp = Path(tempfile.mkdtemp(prefix="art98-render-")) if gif else None
     master = temp / "master.mkv" if temp else output
     named = output or Path(gif)
     video = None
-    staged, kept, results = (
-        [],
-        [],
-        [],
-    )  # part files made; (part, final) clips; (part, final) outputs
+    staged = []  # every part file made, for cleanup
+    kept = []  # (part, final) clips
+    results = []  # (part, final) outputs
     try:
-        video = session.record(master, fps=scene.fps, lossless=bool(gif))
-        video.defer = True  # the parts stay parts until the render is done
+        # defer: the parts stay parts until the render is done
+        video = session.record(
+            master, output_fps=scene.output_fps, lossless=bool(gif), defer=True
+        )
         with video:
             scene.run(session, video)
         staged += video.parts
@@ -107,9 +82,7 @@ def render(
             source = video.join(master, stage=True)
             staged.append(source)
         if gif:
-            write_gif(
-                source, gif, gif_fps, gif_colors, gif_scale, gif_dither, stage=True
-            )
+            write_gif(source, gif, gif_options or GifOptions(), stage=True)
             staged.append(part_path(gif))
             results.append((part_path(gif), gif))
             if output:
@@ -118,12 +91,14 @@ def render(
                 results.append((part_path(output), output))
         else:
             results.append((source, output))
-        for clip, part in zip(video.clips, video.parts) if cut and keep_clips else []:
+        clips = video.finished if cut and keep_clips else []
+        for number, record in enumerate(clips, 1):  # the recorder numbers the same way
+            clip, part = record.final, record.part
             if (
                 clip.suffix == LOSSLESS_SUFFIX
             ):  # kept as H.264, the lossless one dropped
                 clip = (
-                    named.with_name(f"{named.stem}-{clip.stem.rsplit('-', 1)[-1]}.mp4")
+                    named.with_name(f"{named.stem}-{number:02d}.mp4")
                     if clip.parent == temp
                     else clip.with_suffix(".mp4")
                 )
@@ -142,10 +117,10 @@ def render(
     written = {final for _, final in kept}
     stale = stale_clips(named, written)
     if stale:
-        print(
-            f"art98: warning: {', '.join(p.name for p in stale)} left from an earlier render; "
+        warnings.warn(
+            f"{', '.join(p.name for p in stale)} left from an earlier render; "
             f"this render wrote {len(written)} clips.",
-            file=sys.stderr,
+            stacklevel=2,
         )
     return named
 

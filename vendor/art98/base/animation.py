@@ -5,9 +5,10 @@ from __future__ import annotations
 from collections.abc import Callable
 from itertools import pairwise
 
+from ..errors import UsageError
 from .props import Box, Prop, point_of
 from .rate_functions import linear, smooth
-from .vectors import lerp
+from .units import clamp, distance, lerp
 
 
 class Animation:
@@ -81,6 +82,10 @@ class Instant(Animation):
         super().__init__(target, **kwargs)
         self._done = False
 
+    def begin(self, scene) -> None:
+        super().begin(scene)
+        self._done = False
+
     def update(self, progress: float) -> None:
         if not self._done:
             self._done = True
@@ -108,6 +113,8 @@ class AnimationGroup(Animation):
         rate_func=None,
     ):
         super().__init__(run_time=run_time, rate_func=rate_func)
+        if lag_ratio < 0:
+            raise UsageError(f"lag_ratio {lag_ratio} is negative; use 0 or more")
         self.animations = animations
         self.lag_ratio = lag_ratio
         self._spans: list[tuple[float, float]] = []
@@ -129,7 +136,7 @@ class AnimationGroup(Animation):
                 a, b = self._spans[i], self._spans[j]
                 shared = set(first.claims) & set(second.claims)
                 if shared and a[0] < b[1] and b[0] < a[1]:
-                    raise ValueError(
+                    raise UsageError(
                         f"two animations in a group both drive the {shared.pop()}"
                     )
 
@@ -191,22 +198,34 @@ class MoveAlongPath(Animation):
 
 
 def path_function(path) -> Callable[[float], tuple[float, float]]:
-    """Turn a list of points into a function of 0..1, by distance along it."""
+    """Turn a list of points into a function of 0..1, by distance along it.
+
+    Points given as Spots are located at the first call, which is when the
+    animation begins, so a path built up front follows the windows as they are then.
+    """
     if callable(path):
         return path
-    points = [point_of(p) for p in path]
-    if len(points) < 2:
-        raise ValueError("a path needs at least two points")
-    lengths = [abs(b.x - a.x) + abs(b.y - a.y) for a, b in pairwise(points)]
-    total = sum(lengths) or 1.0
+    if len(path) < 2:
+        raise UsageError("a path needs at least two points")
+    measured = {}
+
+    def measure():
+        points = [point_of(p) for p in path]
+        pairs = list(pairwise(points))
+        lengths = [distance(a, b) for a, b in pairs]
+        measured.update(
+            points=points, pairs=pairs, lengths=lengths, total=sum(lengths) or 1.0
+        )
 
     def along(t: float):
-        remaining = max(0.0, min(1.0, t)) * total
-        for (a, b), length in zip(pairwise(points), lengths):
+        if not measured:
+            measure()
+        remaining = clamp(t, 0.0, 1.0) * measured["total"]
+        for (a, b), length in zip(measured["pairs"], measured["lengths"]):
             if remaining <= length and length:
                 return lerp(a, b, remaining / length)
             remaining -= length
-        return points[-1]
+        return measured["points"][-1]
 
     return along
 
@@ -258,4 +277,4 @@ class Animate(Animation):
     def interpolate(self, alpha: float) -> None:
         for field, end in self._end.items():
             start = self._start[field]
-            setattr(self.target, field, start + (end - start) * alpha)
+            setattr(self.target, field, lerp(start, end, alpha))

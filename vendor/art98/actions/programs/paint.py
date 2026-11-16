@@ -6,8 +6,9 @@ import time
 from typing import ClassVar
 
 from ...base.props import Spot
-from ...bridge import BridgeTimeout
-from ...win32 import window_rect
+from ...errors import UsageError
+from ...guest.bridge import BridgeTimeout
+from ...guest.win32 import screen_dc, window_rect
 from ..pointer import Drag
 from ..window.win import Win
 
@@ -114,7 +115,7 @@ class Paint(Win):
     def tool(self, name: str) -> Spot:
         """The toolbox button with this name. See `Paint.TOOLS`."""
         if name not in self.TOOLS:
-            raise ValueError(f"no tool {name!r}; Paint has {', '.join(self.TOOLS)}")
+            raise UsageError(f"no tool {name!r}; Paint has {', '.join(self.TOOLS)}")
 
         def locate():
             left, top, right, bottom = self._rect_of(self._tools[name])
@@ -129,7 +130,7 @@ class Paint(Win):
                 column = names.index(name)
                 break
         else:
-            raise ValueError(f"no colour {name!r} in Paint's palette")
+            raise UsageError(f"no colour {name!r} in Paint's palette")
 
         def locate():
             left, top, _, _ = self._rect_of(self._colors)
@@ -164,7 +165,6 @@ class Paint(Win):
     def _measure_canvas(self) -> tuple[int, int]:
         left, top, right, bottom = self._rect_of(self._view)
         x0, y0 = left + self.CANVAS_MARGIN, top + self.CANVAS_MARGIN
-        screen = self.guest.user32.GetDC(0).value
 
         def in_canvas(x: int, y: int) -> bool:
             colour = self.guest.gdi32.GetPixel(screen, x, y).value & 0xFFFFFF
@@ -177,9 +177,9 @@ class Paint(Win):
             return low
 
         # Ten pixels in from the corner, clear of the handles on the edges.
-        width = edge(x0 + 4, right, lambda x: in_canvas(x, y0 + 10)) - x0 + 1
-        height = edge(y0 + 4, bottom, lambda y: in_canvas(x0 + 10, y)) - y0 + 1
-        self.guest.user32.ReleaseDC(0, screen)
+        with screen_dc(self.guest) as screen:
+            width = edge(x0 + 4, right, lambda x: in_canvas(x, y0 + 10)) - x0 + 1
+            height = edge(y0 + 4, bottom, lambda y: in_canvas(x0 + 10, y)) - y0 + 1
         return width, height
 
     @property

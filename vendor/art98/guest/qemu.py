@@ -13,10 +13,13 @@ from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 from typing import Self
 
+from ..errors import Art98Error
+
 QEMU_BINARY = "qemu-system-i386"
+HOLD_MS = 80  # how long a key press is held, in ms
 
 
-class QemuError(RuntimeError):
+class QemuError(Art98Error, RuntimeError):
     pass
 
 
@@ -49,11 +52,9 @@ class VMConfig:
     vga: str = "cirrus"
     sound: bool = True
     rtc_base: str = "1998-06-25T09:00:00"
-    icount_shift: int | None = None
     floppy: Path | None = None
     boot_once: str | None = None
     loadvm: str | None = None
-    audio_wav: Path | None = None
     display: str = "none"
     extra_args: list[str] = field(default_factory=list)
 
@@ -89,13 +90,10 @@ class VMConfig:
             "-serial",
             "chardev:guest",
         ]
-        if self.icount_shift is not None:
-            args += ["-icount", f"shift={self.icount_shift},sleep=off,align=off"]
         if self.floppy:
             args += ["-drive", f"file={_opt(self.floppy)},format=raw,if=floppy,index=0"]
         if self.sound:
-            backend = f"wav,path={_opt(self.audio_wav)}" if self.audio_wav else "none"
-            args += ["-audiodev", f"{backend},id=snd", "-device", "sb16,audiodev=snd"]
+            args += ["-audiodev", "none,id=snd", "-device", "sb16,audiodev=snd"]
         if self.loadvm:
             args += ["-loadvm", self.loadvm]
         return args + self.extra_args
@@ -108,7 +106,7 @@ class VMConfig:
     def from_json(cls, data: dict) -> VMConfig:
         known = {f.name for f in fields(cls)}
         values = {k: v for k, v in data.items() if k in known}
-        for key in ("disk", "floppy", "audio_wav"):
+        for key in ("disk", "floppy"):
             if values.get(key):
                 values[key] = Path(values[key])
         return cls(**values)
@@ -220,7 +218,7 @@ class VM:
         )
         return Path(path)
 
-    def send_keys(self, *qcodes: str, hold_ms: int = 80) -> None:
+    def send_keys(self, *qcodes: str, hold_ms: int = HOLD_MS) -> None:
         """Press keys together, such as ("alt", "a"), on the guest's keyboard."""
         keys = [{"type": "qcode", "data": code} for code in qcodes]
         self.qmp.execute("send-key", keys=keys, **{"hold-time": hold_ms})

@@ -1,44 +1,44 @@
 """The long-lived VM: start it in a container, stop it, ask how it is, and attach
-a Session to it for one render. Names, ports and the image come from Settings."""
+a Session to it for one render. compose.yaml says how the container runs (see
+art98.container.compose); the work folder, ports and the image come from Settings."""
 
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import secrets
 import shutil
 import socket
-import tempfile
 import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
 
-from .bridge import Bridge, BridgeError
-from .container.host import (
-    SOCKET_DIR,
+from ..errors import Art98Error
+from ..guest.bridge import Bridge, BridgeError
+from ..guest.qemu import QemuError
+from ..session import SNAPSHOT, ImageMissing, Session
+from ..settings import CONTAINER_VNC_PORT, Settings, load
+from . import compose
+from .compose import socket_dir
+from .freshness import container_warning, inspect_created
+from .host import (
+    START_TIMEOUT,
+    ChannelBusy,
     ContainerError,
     Engine,
     RemoteVM,
-    mount_args,
     open_channel,
     transport_name,
 )
-from .container.serve import keepalive, nodelay, read_line
-from .freshness import container_warning, inspect_created
-from .qemu import QemuError
-from .session import SNAPSHOT, ImageMissing, Session
-from .settings import CONTAINER_CONTROL_PORT, CONTAINER_VNC_PORT, Settings, load
+from .serve import keepalive, nodelay, read_line
 
-CONNECT_TIMEOUT = 3.0  # attach: a dead socket is NotRunning in ~3 s, not 120
-START_TIMEOUT = 120.0
+ATTACH_TIMEOUT = 3.0  # attach: a dead socket is NotRunning in ~3 s, not 120
 BUSY_POLL = 0.5
 OLD_IMAGE = "the container image is older than the code; run `art98 up --rebuild`"
-STOP_GRACE = "20"
 
 
-class ServiceError(RuntimeError):
+class ServiceError(Art98Error, RuntimeError):
     pass
 
 
@@ -57,21 +57,8 @@ class Busy(ServiceError):
 # ---- where things are ----
 
 
-def socket_dir(settings: Settings) -> Path:
-    """Deterministic per container name and work path, so two checkouts never share one."""
-    tag = hashlib.sha256(str(settings.work_dir).encode()).hexdigest()[:8]
-    runtime = os.environ.get("XDG_RUNTIME_DIR")
-    base = (
-        Path(runtime) / "art98"
-        if runtime
-        else Path(tempfile.gettempdir())
-        / f"art98-{os.getuid() if hasattr(os, 'getuid') else 0}"
-    )
-    return base / f"{settings.container}-{tag}"
-
-
 def _address(settings: Settings) -> tuple[str, int] | str:
-    if transport_name(default=settings.transport) == "unix":
+    if transport_name(settings.transport) == "unix":
         return str(socket_dir(settings) / "serve.sock")
     return (settings.connect_host, settings.control)
 
@@ -92,7 +79,7 @@ def _token(settings: Settings) -> str | None:
         return None
 
 
-def _read_status(address, token: str, timeout: float = CONNECT_TIMEOUT) -> dict:
+def _read_status(address, token: str, timeout: float = ATTACH_TIMEOUT) -> dict:
     """The status channel: after the handshake ONE JSON line, no `ok` before it."""
     where = _where(address)
     sock = None
@@ -129,38 +116,21 @@ def _read_status(address, token: str, timeout: float = CONNECT_TIMEOUT) -> dict:
 # ---- start / stop / status ----
 
 
-def _labelled(engine, work: Path, everything: bool = True) -> list[str]:
+def _container(engine, settings: Settings, everything: bool = False) -> str | None:
+    """The id of this work dir's VM container, running or (everything) not."""
     flag = "-aq" if everything else "-q"
-    out = engine("ps", flag, "--filter", f"label=art98.work={work}").stdout
-    return out.decode().split()
+    out = compose.run(engine, settings, "ps", flag, "vm", check=False).stdout.split()
+    return out[0].decode() if out else None
 
 
-def _remove(engine, cid: str, work: Path, log=print) -> None:
-    """Stop and remove one container, only when it is labelled for this work dir."""
-    done = engine(
-        "inspect", "-f", '{{index .Config.Labels "art98.work"}}', cid, check=False
-    )
-    if done.returncode == 0 and done.stdout.decode().strip() != str(work):
-        raise ServiceError(f"refusing to stop {cid}: it is not labelled for {work}")
-    if done.returncode != 0:
-        return  # already gone
-    # SIGTERM reaches serve through --init, so its run copy is deleted on the way out.
-    stopped = engine("stop", "-t", STOP_GRACE, cid, check=False)
-    if stopped.returncode == 0:
-        engine("rm", cid)
-    else:
-        engine("rm", "-f", cid)
-    log(f"stopped {cid[:12]}")
-
-
-def _clean_state(settings: Settings) -> None:
-    (settings.work_dir / "vm.cid").unlink(missing_ok=True)
+def _down(engine, settings: Settings) -> None:
+    """Stop and remove this project's containers. SIGTERM reaches serve through
+    init, so its run copy is deleted on the way out."""
+    compose.run(engine, settings, "down", "--remove-orphans")
     shutil.rmtree(socket_dir(settings), ignore_errors=True)
 
 
-def start(
-    settings: Settings | None = None, *, vnc=False, engine=None, log=print
-) -> None:
+def start(settings: Settings | None = None, *, engine=None, log=print) -> None:
     settings = settings or load()
     work = settings.work_dir
     if not (work / "image.json").exists():
@@ -169,17 +139,15 @@ def start(
     if not engine.has_image(settings.image):
         raise ContainerError(f"no image {settings.image}; run `art98 up` to build it")
 
-    running = _labelled(engine, work, everything=False)
-    if running:
+    if _container(engine, settings):
         try:
             _read_status(_address(settings), _token(settings) or "")
             log("already running")
             return
         except ServiceError:
             pass  # a stale or sick container: replace it
-    for cid in _labelled(engine, work):
-        _remove(engine, cid, work, log)
-    # No container labelled for this work dir is left, so no run copy is in use.
+    _down(engine, settings)
+    # No container of this work dir's project is left, so no run copy is in use.
     for stale in (work / "runs").glob("vm-*"):
         shutil.rmtree(stale, ignore_errors=True)
 
@@ -189,66 +157,39 @@ def start(
         fd = os.open(token_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         with os.fdopen(fd, "w") as handle:
             handle.write(secrets.token_hex(32))
-    (work / "vm.cid").unlink(missing_ok=True)  # docker refuses an existing cidfile
-
-    unix = transport_name(default=settings.transport) == "unix"
-    if unix:
-        shutil.rmtree(socket_dir(settings), ignore_errors=True)
+    if transport_name(settings.transport) == "unix":
         socket_dir(settings).mkdir(parents=True, mode=0o700)
-        listen = ["-v", f"{socket_dir(settings)}:{SOCKET_DIR}"]
-        serve = ["--unix", f"{SOCKET_DIR}/serve.sock"]
-    else:
-        listen = ["-p", f"{settings.bind}:{settings.control}:{CONTAINER_CONTROL_PORT}"]
-        serve = []
-    if vnc:
-        listen += ["-p", f"{settings.bind}:{settings.vnc}:{CONTAINER_VNC_PORT}"]
-    token_mount = []  # a token outside work/ is mounted at serve's default secret path
-    token_target = "/work/vm.token"
-    if token_path != work / "vm.token":
-        token_target = "/run/secrets/art98_token"
-        token_mount = ["-v", f"{token_path}:{token_target}:ro"]
-    engine(
-        "run", "-d", "--init",
-        "--name", settings.container,
-        "--label", f"art98.work={work}",
-        "--cidfile", str(work / "vm.cid"),
-        *mount_args(work),
-        *listen,
-        *token_mount,
-        settings.image,
-        "serve", "--work", "/work", "--token-file", token_target,
-        *serve,
-        *(["--vnc"] if vnc else []),
-    )  # fmt: skip
-    cid = (work / "vm.cid").read_text().strip()
 
     def fail(error: ServiceError) -> ServiceError:
-        logs = engine("logs", "--tail", "20", cid, check=False)
+        logs = compose.run(engine, settings, "logs", "--tail", "20", "vm", check=False)
         tail = (logs.stdout + logs.stderr).decode(errors="replace").strip()
-        _remove(engine, cid, work, log)
-        _clean_state(settings)
+        _down(engine, settings)
         if tail:
             error = type(error)(f"{error}\n{tail}")
         return error
 
-    token = token_path.read_text().strip()
-    deadline = time.monotonic() + START_TIMEOUT
-    while True:
-        try:
-            reply = _read_status(_address(settings), token)
-        except NotRunning as error:
-            if time.monotonic() > deadline:
-                raise fail(error) from None
-            alive = engine("ps", "-q", "--filter", f"id={cid}", check=False)
-            if not alive.stdout.strip():
-                raise fail(
-                    ServiceError("the VM container exited while starting")
-                ) from None
-            time.sleep(0.2)
-            continue
-        except Unhealthy as error:
-            raise fail(error) from None
-        break
+    # The healthcheck in compose.yaml passes once serve listens, after the guest agent answers.
+    wait = str(int(START_TIMEOUT))
+    started = compose.run(
+        engine,
+        settings,
+        "up",
+        "-d",
+        "--wait",
+        "--wait-timeout",
+        wait,
+        "vm",
+        check=False,
+    )
+    if started.returncode:
+        detail = started.stderr.decode(errors="replace").strip().splitlines()
+        raise fail(
+            ServiceError(f"the VM did not start: {detail[-1] if detail else ''}")
+        )
+    try:
+        reply = _read_status(_address(settings), token_path.read_text().strip())
+    except ServiceError as error:
+        raise fail(error) from None
     if SNAPSHOT not in reply.get("snapshots", []):
         raise fail(
             Unhealthy(f"the VM has no `{SNAPSHOT}` snapshot; run `art98 up` ...")
@@ -270,20 +211,10 @@ def start(
 
 def stop(settings: Settings | None = None, *, engine=None, log=print) -> None:
     settings = settings or load()
-    work = settings.work_dir
     engine = engine or Engine()
-    try:
-        ids = [(work / "vm.cid").read_text().strip()]
-        ids = [i for i in ids if i] or _labelled(engine, work)
-    except OSError:
-        ids = _labelled(engine, work)
-    if len(ids) > 1:
-        raise ServiceError(f"more than one container is labelled for {work}: {ids}")
-    for cid in ids:
-        _remove(engine, cid, work, log)
-    if not ids:
-        log("nothing to stop")
-    _clean_state(settings)  # vm.token stays
+    cid = _container(engine, settings, everything=True)
+    _down(engine, settings)  # vm.token stays
+    log(f"stopped {cid[:12]}" if cid else "nothing to stop")
 
 
 def status(settings: Settings | None = None, *, engine=None) -> dict:
@@ -303,13 +234,14 @@ def status(settings: Settings | None = None, *, engine=None) -> dict:
     )
     try:
         engine = engine or Engine()
-        cid = (settings.work_dir / "vm.cid").read_text().strip()
+        cid = _container(engine, settings)
         out["container"] = cid
-        try:
-            host, port = engine.port(cid, CONTAINER_VNC_PORT)
-            out["vnc"] = f"{host}:{port}"
-        except ContainerError:
-            pass  # VNC was not asked for
+        if cid:
+            try:
+                host, port = engine.port(cid, CONTAINER_VNC_PORT)
+                out["vnc"] = f"{host}:{port}"
+            except ContainerError:
+                pass  # no VNC port in compose.override.yaml
         created = inspect_created(engine, settings.image)[1]
         out["image_stale"] = bool(container_warning(created, settings.image))
     except (ContainerError, OSError):
@@ -335,19 +267,19 @@ def _connect(settings: Settings) -> Session:
     if reply.get("busy"):
         raise Busy("the VM is busy: another render holds it")
     try:
-        control = open_channel(address, token, "control", CONNECT_TIMEOUT)
+        control = open_channel(address, token, "control", ATTACH_TIMEOUT)
     except TimeoutError:
         raise NotRunning(
             f"the VM is not running (nothing answers on {_where(address)}); run `art98 vm start`"
         ) from None
+    except ChannelBusy:
+        raise Busy("the VM is busy: another render holds it") from None
     except ContainerError as error:
-        if "channel: busy" in str(error):
-            raise Busy("the VM is busy: another render holds it") from None
         raise Unhealthy(str(error)) from None
     shared = socket_dir(settings) if isinstance(address, str) else None
     vm = RemoteVM(control, shared_dir=shared)
     try:
-        agent = open_channel(address, token, "agent", CONNECT_TIMEOUT)
+        agent = open_channel(address, token, "agent", ATTACH_TIMEOUT)
     except (TimeoutError, ContainerError) as error:
         vm.close()
         raise Unhealthy(f"the VM's agent channel failed: {error}") from None

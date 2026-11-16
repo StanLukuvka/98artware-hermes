@@ -6,7 +6,7 @@ touched, so a mistake in the file never leaves a half-made desktop.
     {
       "version": 1,
       "display": [800, 600, 16],
-      "desktop": {"colour": [0, 128, 128],
+      "desktop": {"fill_colour": [0, 128, 128],
                   "wallpaper": {"file": "assets/wall.bmp", "sha256": "..."},
                   "style": "center" | "tile" | "stretch"},
       "windows": [
@@ -21,7 +21,9 @@ Windows are listed back to front, so the last one is on top and active.
 Anything a state leaves out stays as it is on the baseline. Files are found
 relative to the state file, and their hash must match. Unknown fields fail.
 
-`desktop` is optional, and so is each part of it. `style` needs a wallpaper
+`desktop` is optional, and so is each part of it. `fill_colour` is the plain desktop colour
+behind the icons and around a centred wallpaper (Windows calls it "Desktop" in Display
+Properties, Appearance), not the taskbar or selection colour. `style` needs a wallpaper
 (default "center"). The wallpaper reaches the guest on a CD, so a state without
 one never touches the drive. Desktop icons and the tray come later.
 """
@@ -33,40 +35,40 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 
-from .desktop import STYLES
-from .guestfiles import check_bmp, check_text, name_problem, title_problem
+from .actions.apps import APPS
+from .desktop import STYLES, resolve_colour
+from .errors import Art98Error, NotFound, UsageError
+from .guest.guestfiles import check_bmp, name_problem, title_problem
+from .guest.win32 import DISPLAY_SIZES
 
 VERSION = 1
 SHOWS = ("normal", "minimized", "maximized")
 DEPTHS = (8, 16, 24, 32)
 TOP_FIELDS = {"version", "display", "desktop", "windows", "pointer"}
-DESKTOP_FIELDS = {"colour", "wallpaper", "style"}
+DESKTOP_FIELDS = {"fill_colour", "wallpaper", "style"}
 WINDOW_FIELDS = {"id", "app", "title", "at", "size", "show", "open"}
 FILE_FIELDS = {"file", "sha256"}
-LATER = {"focus": "the last window is the active one"}
+LATER = {"focus": "order the windows instead: the last one is active"}
 LATER_DESKTOP = {
     "icons": "desktop icons come after this milestone",
     "tray": "the tray comes after this milestone",
 }
+# Emptied at each release, like `RETIRED` in scene.py.
+RENAMED_DESKTOP = {"colour": "fill_colour"}
+RENAMED_NONE: dict = {}
 
 
-def programs() -> tuple[str, ...]:
-    """The programs a state can open, by their name in the file.
-
-    They're listed once, with their classes, in anim/setstate.py. That module
-    imports this one, so the import happens here at call time.
-    """
-    from .anim.setstate import APPS
-
-    return tuple(APPS)
+def problem_text(path: Path | str, problems: list[str]) -> str:
+    """The message of an error about a state file: its path, then one line per problem."""
+    return f"{path}:\n" + "\n".join(f"  {p}" for p in problems)
 
 
-class StateError(ValueError):
+class StateError(Art98Error, ValueError):
     """A state file that can't be used, with every problem found in it."""
 
     def __init__(self, path: Path | str, problems: list[str]):
         self.path, self.problems = Path(path), problems
-        super().__init__(f"{path}:\n" + "\n".join(f"  {p}" for p in problems))
+        super().__init__(problem_text(path, problems))
 
 
 @dataclass(frozen=True)
@@ -89,7 +91,7 @@ class WindowState:
 
 @dataclass(frozen=True)
 class DesktopState:
-    colour: tuple[int, int, int] | None = None
+    fill_colour: tuple[int, int, int] | None = None
     wallpaper: FileRef | None = None
     style: str = "center"
 
@@ -106,7 +108,7 @@ class State:
         for window in self.windows:
             if window.id == id:
                 return window
-        raise KeyError(f"{self.path} has no window {id!r}")
+        raise NotFound(f"{self.path} has no window {id!r}")
 
 
 def _whole_numbers(value, count: int) -> bool:
@@ -124,16 +126,26 @@ class _Reader:
     def fail(self, where: str, message: str) -> None:
         self.problems.append(f"{where}: {message}")
 
-    def fields(self, value, allowed: set[str], where: str, later: dict = LATER) -> bool:
+    def fields(
+        self,
+        value,
+        allowed: set[str],
+        where: str,
+        later: dict = LATER,
+        renamed: dict = RENAMED_NONE,
+    ) -> bool:
         if not isinstance(value, dict):
             self.fail(where, "should be an object")
             return False
         for key in sorted(set(value) - allowed):
             reason = later.get(key)
-            self.fail(
-                f"{where}.{key}" if where != "state" else key,
-                f"not supported yet: {reason}" if reason else "unknown field",
-            )
+            if key in renamed:
+                message = f"renamed to {renamed[key]}"
+            elif reason:
+                message = f"not supported yet: {reason}"
+            else:
+                message = "unknown field"
+            self.fail(f"{where}.{key}" if where != "state" else key, message)
         return True
 
     def numbers(self, value, count: int, where: str, positive: bool = False):
@@ -156,8 +168,14 @@ class _Reader:
         if not path.is_file():
             self.fail(f"{where}.file", f"{path} doesn't exist")
             return None
-        data = path.read_bytes()
+        try:
+            data = path.read_bytes()
+        except OSError as error:
+            self.fail(f"{where}.file", f"can't read {path}: {error.strerror}")
+            return None
         actual = hashlib.sha256(data).hexdigest()
+        if isinstance(digest, str):
+            digest = digest.lower()
         if digest != actual:
             self.fail(
                 f"{where}.sha256",
@@ -168,31 +186,36 @@ class _Reader:
         return FileRef(path, actual, data)
 
     def desktop(self, value, where: str) -> DesktopState | None:
-        if not self.fields(value, DESKTOP_FIELDS, where, LATER_DESKTOP):
+        if not self.fields(
+            value, DESKTOP_FIELDS, where, LATER_DESKTOP, RENAMED_DESKTOP
+        ):
             return None
         problems = len(self.problems)
-        colour = wallpaper = None
-        if "colour" in value:
-            colour = self.numbers(value["colour"], 3, f"{where}.colour")
-            if colour and not all(0 <= c <= 255 for c in colour):
-                self.fail(f"{where}.colour", "needs numbers from 0 to 255")
+        fill_colour = wallpaper = None
+        if "fill_colour" in value:
+            fill_colour = self.numbers(value["fill_colour"], 3, f"{where}.fill_colour")
+            if fill_colour:
+                try:
+                    resolve_colour(fill_colour)
+                except UsageError as error:
+                    self.fail(f"{where}.fill_colour", str(error))
         if "wallpaper" in value:
             wallpaper = self.file(value["wallpaper"], f"{where}.wallpaper")
             if wallpaper is not None:
                 try:
                     check_bmp(wallpaper.data, str(wallpaper.path))
-                except ValueError as error:
+                except UsageError as error:
                     self.fail(f"{where}.wallpaper", str(error))
         style = value.get("style", "center")
         if "style" in value and "wallpaper" not in value:
             self.fail(f"{where}.style", "needs a wallpaper")
-        elif style not in STYLES:
+        elif not isinstance(style, str) or style not in STYLES:
             self.fail(
                 f"{where}.style", f"should be one of {', '.join(STYLES)}, not {style!r}"
             )
         if len(self.problems) > problems:
             return None
-        return DesktopState(colour, wallpaper, style)
+        return DesktopState(fill_colour, wallpaper, style)
 
     def window(self, value, where: str) -> WindowState | None:
         if not self.fields(value, WINDOW_FIELDS, where):
@@ -202,10 +225,10 @@ class _Reader:
         if not isinstance(id_, str) or not id_:
             self.fail(f"{where}.id", "needs a name")
         app = value.get("app")
-        apps = programs()
-        if app not in apps:
+        known = isinstance(app, str) and app in APPS
+        if not known:
             self.fail(
-                f"{where}.app", f"should be one of {', '.join(apps)}, not {app!r}"
+                f"{where}.app", f"should be one of {', '.join(APPS)}, not {app!r}"
             )
         title = value.get("title")
         if title is not None and not isinstance(title, str):
@@ -228,23 +251,15 @@ class _Reader:
                     f"{opened.path.name!r} can't be a file name on the"
                     f" guest: it {name_problem(opened.path.name)}",
                 )
-            elif opened is not None and app in apps:
+            elif opened is not None and known:
                 try:
-                    (check_bmp if app == "picture" else check_text)(
-                        opened.data, str(opened.path)
-                    )
-                except ValueError as error:
+                    APPS[app].check_file(opened.data, str(opened.path))
+                except UsageError as error:
                     self.fail(f"{where}.open", str(error))
         if len(self.problems) > problems:
             return None
         if title is None:
-            from .actions.programs.notepad import notepad_title  # lazy, like programs()
-
-            title = (
-                "Picture"
-                if app == "picture"
-                else notepad_title(opened.path if opened else None)
-            )
+            title = APPS[app].default_title(opened.path if opened else None)
         return WindowState(id_, app, title, at, size, show, opened)
 
     def state(self, value) -> State | None:
@@ -255,6 +270,9 @@ class _Reader:
         display = None
         if "display" in value:
             display = self.numbers(value["display"], 3, "display", positive=True)
+            if display and display[:2] not in DISPLAY_SIZES:
+                sizes = ", ".join(f"{w}x{h}" for w, h in DISPLAY_SIZES)
+                self.fail("display", f"size should be one of {sizes}")
             if display and display[2] not in DEPTHS:
                 self.fail("display", f"colour depth should be one of {DEPTHS}")
         desktop = (
@@ -277,7 +295,15 @@ class _Reader:
         if "pointer" in value:
             pointer = self.numbers(value["pointer"], 2, "pointer")
             if pointer and min(pointer) < 0:
-                self.fail("pointer", "should be on the screen")
+                self.fail("pointer", "can't be negative")
+            elif (
+                pointer
+                and display
+                and not (pointer[0] < display[0] and pointer[1] < display[1])
+            ):
+                self.fail(
+                    "pointer", f"should be on the {display[0]}x{display[1]} screen"
+                )
         if self.problems:
             return None
         return State(self.path, display, tuple(windows), pointer, desktop)
@@ -287,9 +313,11 @@ def load_state(path: Path | str) -> State:
     """Read and check a state file, or raise StateError listing every problem."""
     path = Path(path).resolve()
     try:
-        value = json.loads(path.read_text())
+        value = json.loads(path.read_text(encoding="utf-8"))
     except FileNotFoundError:
         raise StateError(path, ["the file doesn't exist"]) from None
+    except OSError as error:
+        raise StateError(path, [f"can't read the file: {error.strerror}"]) from None
     except (json.JSONDecodeError, UnicodeDecodeError) as error:
         raise StateError(path, [f"not valid JSON: {error}"]) from None
     reader = _Reader(path)

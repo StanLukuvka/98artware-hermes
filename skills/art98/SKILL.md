@@ -76,7 +76,7 @@ WM_NCACTIVATE = 0x0086
 
 
 class Hello(Scene):
-    fps = 24
+    output_fps = 24  # frames per second of the finished video (default 30)
     desktop = "blank"  # black, no icons or taskbar; "stock" is the normal desktop
 
     def construct(self):

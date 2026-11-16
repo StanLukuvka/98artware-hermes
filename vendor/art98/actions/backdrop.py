@@ -13,8 +13,6 @@ class Backdrop(Instant):
     ValueError on anything else.
     """
 
-    claims = ()
-
     def __init__(self, colour, **kwargs):
         super().__init__(None, **kwargs)
         self.rgb = resolve_colour(colour)

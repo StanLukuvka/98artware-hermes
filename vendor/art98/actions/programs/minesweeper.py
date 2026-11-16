@@ -2,17 +2,18 @@
 
 from __future__ import annotations
 
-import math
 import time
 from typing import ClassVar
 
 from ...base.props import Spot
+from ...base.units import distance
 from ...base.vectors import Vec
+from ...errors import GuestError
+from ...guest.win32 import SW_HIDE, SW_SHOWNA, screen_dc
 from ..keyboard import Keys, TypeKeys
 from ..pointer import Click, RightClick
 from ..window.win import Win
 
-SW_HIDE, SW_SHOWNA = 0, 8
 BLACK = 0
 
 
@@ -71,17 +72,16 @@ class Minesweeper(Win):
         desktop = guest.find_window(class_name="Progman")
         guest.user32.ShowWindow(desktop.hwnd, SW_HIDE)
         guest.sync()
-        screen = guest.user32.GetDC(0).value
         pointer = self.scene.pointer
         home = pointer.get_center()
         mines = set()
-        for row in range(rows):
-            for column in range(columns):
-                guest.user32.SetCursorPos(*self.cell(column, row).point().rounded())
-                guest.sync()
-                if guest.gdi32.GetPixel(screen, 0, 0).value & 0xFFFFFF == BLACK:
-                    mines.add((column, row))
-        guest.user32.ReleaseDC(0, screen)
+        with screen_dc(guest) as screen:
+            for row in range(rows):
+                for column in range(columns):
+                    guest.user32.SetCursorPos(*self.cell(column, row).point().rounded())
+                    guest.sync()
+                    if guest.gdi32.GetPixel(screen, 0, 0).value & 0xFFFFFF == BLACK:
+                        mines.add((column, row))
         guest.user32.ShowWindow(desktop.hwnd, SW_SHOWNA)
         guest.sync()
         guest.user32.SetCursorPos(*Vec(*home).rounded())
@@ -89,7 +89,7 @@ class Minesweeper(Win):
 
         expected = self.MINES.get((columns, rows))
         if expected is not None and len(mines) != expected:
-            raise RuntimeError(f"expected {expected} mines, read {len(mines)}")
+            raise GuestError(f"expected {expected} mines, read {len(mines)}")
         self.mines = mines
         return mines
 
@@ -129,7 +129,7 @@ class Minesweeper(Win):
 
         def nearest(group):
             here = scene.pointer.get_center()
-            return min(group, key=lambda c: math.hypot(*(centres[c] - here)))
+            return min(group, key=lambda c: distance(centres[c], here))
 
         remaining = cells - self.mines
         first = max(sorted(remaining), key=lambda cell: len(self.opened_by(cell)))

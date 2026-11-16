@@ -5,14 +5,15 @@ from __future__ import annotations
 import time
 
 from ...base.vectors import Vec
-from ...bridge import BridgeTimeout
+from ...errors import UsageError
+from ...guest.bridge import BridgeTimeout
 from ..window.win import Win
 
 
 class Screensaver(Win):
     """A screensaver, started directly with /s.
 
-    Adding it starts it. Follow with `self.live(seconds)`, because it runs by
+    Adding it starts it. Follow with `self.wait(seconds)`, because it runs by
     itself. `stop` nudges the pointer, which is how a real one is dismissed.
     """
 
@@ -28,11 +29,12 @@ class Screensaver(Win):
         "Flying Through Space",
         "Flying Windows",
         "Mystify Your Mind",
+        "Scrolling Marquee",
     )
 
     def __init__(self, name: str = "3D Pipes"):
         if name not in self.NAMES:
-            raise ValueError(
+            raise UsageError(
                 f"no screensaver {name!r}; the image has {', '.join(self.NAMES)}"
             )
         super().__init__(command=f'"C:\\WINDOWS\\SYSTEM\\{name}.scr" /s')

@@ -5,12 +5,17 @@ from __future__ import annotations
 import struct
 from typing import ClassVar
 
-from ... import win32
-from ...win32 import GWL_STYLE
+from ...errors import UsageError
+from ...guest import win32
+from ...guest.win32 import (
+    DIALOG_CLASS,
+    MB_ICONINFORMATION,
+    SS_ICON,
+    STM_SETICON,
+    window_style,
+)
 from ..window.win import Win
 
-STM_SETICON, SS_ICON = 0x0170, 3
-BASE_ICON = 0x40  # MB_ICONINFORMATION: reserves the icon slot, which is then replaced
 BUTTON_W, BUTTON_H, BUTTON_GAP, BOTTOM_MARGIN = 75, 23, 6, 11
 TEXT_X, RIGHT_MARGIN, LINE_H = 62, 16, 15
 
@@ -26,7 +31,7 @@ class Dialog(Win):
     fit. `disabled` greys every button. `set_message` changes the text.
     """
 
-    window_class = "#32770"
+    window_class = DIALOG_CLASS
     ICONS: ClassVar[dict[str | None, int]] = {
         None: 0,
         "error": 0x10,
@@ -34,7 +39,7 @@ class Dialog(Win):
         "warning": 0x30,
         "info": 0x40,
     }
-    # Each one seen in a real box (experiments/dialog-storm/README-p1.md).
+    # Each one seen in a real box (experiments/dialog-storm/README-p1.md, dev branch).
     CUSTOM_ICONS: ClassVar[dict[str, tuple[str, int]]] = {
         "computer": (r"C:\WINDOWS\SYSTEM\shell32.dll", 15),
         "printer": (r"C:\WINDOWS\SYSTEM\shell32.dll", 16),
@@ -82,10 +87,10 @@ class Dialog(Win):
         elif icon in self.CUSTOM_ICONS:
             self._custom = self.CUSTOM_ICONS[icon]
         elif icon not in self.ICONS:
-            raise ValueError(f"unknown icon {icon!r}")
-        self.style = (BASE_ICON if self._custom else self.ICONS[icon]) | self.BUTTONS[
-            buttons
-        ]
+            raise UsageError(f"unknown icon {icon!r}")
+        # A custom icon reserves the information icon's slot, which is then replaced.
+        base = MB_ICONINFORMATION if self._custom else self.ICONS[icon]
+        self.style = base | self.BUTTONS[buttons]
         self._call = None
         self._hicon = None
         self._text_hwnd = None
@@ -122,7 +127,7 @@ class Dialog(Win):
             self._size_checked = True
             if self._size[0] < self._sent[2] or self._size[1] < self._sent[3]:
                 # lazy: the box stays open on the guest until the next revert.
-                raise ValueError(
+                raise UsageError(
                     f"size {self._size} is smaller than the stock box "
                     f"{self._sent[2:]}: the text and buttons would be clipped"
                 )
@@ -131,10 +136,7 @@ class Dialog(Win):
     def ready(self) -> None:
         user32 = self.guest.user32
         statics = self.children("Static")
-        styles = {
-            w.hwnd: user32.GetWindowLongA(w.hwnd, GWL_STYLE & 0xFFFFFFFF).value
-            for w in statics
-        }
+        styles = {w.hwnd: window_style(self.guest, w.hwnd) for w in statics}
         text = [w.hwnd for w in statics if styles[w.hwnd] & 0x1F != SS_ICON]
         self._text_hwnd = text[0] if text else None
         if self._custom:
@@ -151,7 +153,7 @@ class Dialog(Win):
     def _set_icon(self, slot: int, dll: str, index: int) -> None:
         hicon = self.guest.shell32.ExtractIconA(0, dll, index).value
         if hicon in (0, 1):
-            raise ValueError(f"{dll} has no icon {index}")
+            raise UsageError(f"{dll} has no icon {index}")
         self.guest.user32.SendMessageA(slot, STM_SETICON, hicon, 0)
         # The static does not copy the icon, so it is destroyed only in remove().
         self._hicon = hicon
@@ -202,7 +204,7 @@ class Dialog(Win):
             win32.window_rect(self.guest, w.hwnd) for w in self.children("Button")
         ]
         if buttons and top + height > min(b[1] for b in buttons):
-            raise ValueError(
+            raise UsageError(
                 "the message is too tall for the box: give the Dialog a bigger size"
             )
         user32.MoveWindow(

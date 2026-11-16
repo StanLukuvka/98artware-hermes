@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import NamedTuple
 
+from .units import pixel
+
 
 class Vec(NamedTuple):
     """A point or offset on the screen. It adds and scales like a vector."""
@@ -14,7 +16,11 @@ class Vec(NamedTuple):
     def __add__(self, other) -> Vec:
         return Vec(self.x + other[0], self.y + other[1])
 
-    __radd__ = __add__
+    def __radd__(self, other) -> Vec:
+        """Lets `sum(points)` work: its starting 0 counts as the zero vector."""
+        if isinstance(other, int) and other == 0:
+            return self
+        return self + other
 
     def __sub__(self, other) -> Vec:
         return Vec(self.x - other[0], self.y - other[1])
@@ -34,7 +40,7 @@ class Vec(NamedTuple):
         return Vec(-self.x, -self.y)
 
     def rounded(self) -> tuple[int, int]:
-        return round(self.x), round(self.y)
+        return pixel(self.x), pixel(self.y)
 
 
 ORIGIN = Vec(0, 0)
@@ -46,9 +52,3 @@ UL = UP + LEFT
 UR = UP + RIGHT
 DL = DOWN + LEFT
 DR = DOWN + RIGHT
-
-
-def lerp(start, end, alpha: float) -> Vec:
-    return Vec(
-        start[0] + (end[0] - start[0]) * alpha, start[1] + (end[1] - start[1]) * alpha
-    )

@@ -16,13 +16,19 @@ from ..actions.pointer import (
     RightClick,
     Stroke,
 )
-from ..actions.programs import Dialog, Minesweeper, Notepad, Paint, Screensaver
+from ..actions.programs import (
+    Dialog,
+    Minesweeper,
+    Notepad,
+    Paint,
+    Picture,
+    Screensaver,
+)
 from ..actions.window import (
     Close,
     Maximize,
     Menu,
     Minimize,
-    Picture,
     RestoreWindow,
     Teleport,
     Win,
@@ -46,8 +52,10 @@ from ..base.rate_functions import (
     smoothstep,
     there_and_back,
 )
-from ..base.vectors import DL, DOWN, DR, LEFT, ORIGIN, RIGHT, UL, UP, UR, Vec, lerp
-from .renderer import render, write_gif
+from ..base.units import lerp
+from ..base.vectors import DL, DOWN, DR, LEFT, ORIGIN, RIGHT, UL, UP, UR, Vec
+from ..output.gif import GifOptions
+from .renderer import render
 from .scene import Scene
 
 __all__ = [
@@ -70,6 +78,7 @@ __all__ = [
     "Dialog",
     "DoubleClick",
     "Drag",
+    "GifOptions",
     "Glide",
     "Hover",
     "Instant",
@@ -107,5 +116,4 @@ __all__ = [
     "smooth",
     "smoothstep",
     "there_and_back",
-    "write_gif",
 ]

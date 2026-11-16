@@ -11,18 +11,26 @@ from __future__ import annotations
 import hashlib
 import os
 import struct
+from dataclasses import dataclass
 from pathlib import Path
 
+from ..errors import MissingFile, UsageError
+from .win32 import BI_BITFIELDS, BI_JPEG, BI_PNG, BI_RGB, INVALID_FILE_ATTRIBUTES
+
 GUEST_DIR = r"C:\ART98"
-INVALID_FILE_ATTRIBUTES = 0xFFFFFFFF
 BAD_NAME_CHARS = set('\\/:*?"<>|')
 BMP_HEADER_SIZES = {12, 40, 52, 56, 108, 124}
 BMP_DEPTHS = {1, 4, 8, 16, 24, 32}
-BI_RGB, BI_BITFIELDS = 0, 3
+# A path is at most 260 characters with its NUL; `C:\ART98\F1234567\` takes 17.
+MAX_NAME = 260 - 1 - len(GUEST_DIR + "\\F1234567\\")
+DOS_DEVICES = {"CON", "PRN", "AUX", "NUL"}
+DOS_DEVICES |= {f"{kind}{n}" for kind in ("COM", "LPT") for n in range(1, 10)}
+BMP_COMPRESSIONS = {BI_RGB, BI_BITFIELDS}  # the ones whose pixel size is known
+BMP_REFUSED = {BI_JPEG, BI_PNG}  # LoadImage on Windows 98 can't read these
 TEXT_LIMIT = 50_000  # Windows 98 Notepad offers WordPad above this
 
 
-class GuestBuildMissing(FileNotFoundError):
+class GuestBuildMissing(MissingFile):
     """guest/build has no programs: make hasn't run."""
 
 
@@ -31,16 +39,21 @@ def guest_build() -> Path:
     overrides it, for a copy of the library that lives outside the checkout."""
     if os.environ.get("ART98_GUEST_BUILD"):
         return Path(os.environ["ART98_GUEST_BUILD"]).expanduser()
-    return Path(__file__).resolve().parents[2] / "guest" / "build"
+    return Path(__file__).resolve().parents[3] / "guest" / "build"
 
 
-def _not_cp1252(text: str) -> bool:
-    """True if protocol.py would turn part of it into "?" (it encodes with errors="replace")."""
+def not_cp1252(text: str) -> str:
+    """The characters of `text` that Windows 1252 can't hold, which protocol.py
+    would turn into "?". Empty if none."""
+    return "".join(sorted({c for c in text if not _fits_cp1252(c)}))
+
+
+def _fits_cp1252(char: str) -> bool:
     try:
-        text.encode("cp1252")
+        char.encode("cp1252")
     except UnicodeEncodeError:
-        return True
-    return False
+        return False
+    return True
 
 
 def name_problem(name: str) -> str | None:
@@ -53,8 +66,12 @@ def name_problem(name: str) -> str | None:
         return "has a control character"
     if name[-1] in " .":
         return "ends in a space or a dot, which Windows drops"
-    if _not_cp1252(name):
+    if not_cp1252(name):
         return "has characters outside Windows 1252, which would become '?'"
+    if len(name) > MAX_NAME:
+        return f"is {len(name)} characters; the longest the guest path allows is {MAX_NAME}"
+    if name.split(".")[0].upper() in DOS_DEVICES:
+        return "is a DOS device name (CON, PRN, AUX, NUL, COM1-9, LPT1-9)"
     return None
 
 
@@ -66,16 +83,24 @@ def title_problem(title: str) -> str | None:
         return "has a control character"
     if title.endswith("\\"):
         return "ends in a backslash, which would escape the closing quote"
-    if _not_cp1252(title):
+    if not_cp1252(title):
         return "has characters outside Windows 1252, which would become '?'"
     return None
 
 
+def read_host_file(path: Path) -> bytes:
+    """The bytes of a file on the host, or MissingFile if it isn't there."""
+    try:
+        return path.read_bytes()
+    except FileNotFoundError:
+        raise MissingFile(f"no file {str(path)!r}") from None
+
+
 def check_name(name: str) -> str:
-    """Return the file name, or raise ValueError saying what is wrong with it."""
+    """Return the file name, or raise UsageError saying what is wrong with it."""
     problem = name_problem(name)
     if problem:
-        raise ValueError(f"{name!r} can't be a file name on the guest: it {problem}")
+        raise UsageError(f"{name!r} can't be a file name on the guest: it {problem}")
     return name
 
 
@@ -86,7 +111,11 @@ def guest_path(data: bytes, name: str) -> str:
 
 
 def ensure(guest, data: bytes, name: str) -> str:
-    """Copy data to the guest unless it is there already, and return its path."""
+    """Copy data to the guest unless a file is there already, and return its path.
+
+    The folder name is the first 7 hex digits of the data's hash, so a file found there is
+    almost certainly these bytes. A copy cut short earlier in the same boot would be reused.
+    """
     path = guest_path(data, name)
     if guest.kernel32.GetFileAttributesA(path).value == INVALID_FILE_ATTRIBUTES:
         guest.kernel32.CreateDirectoryA(path.rsplit("\\", 1)[0], 0)
@@ -102,51 +131,77 @@ def viewer() -> bytes:
     return path.read_bytes()
 
 
-def check_bmp(data: bytes, source: str = "image") -> tuple[int, int]:
-    """Return a BMP's (width, height), or raise ValueError if it isn't one Windows 98 can load."""
+@dataclass(frozen=True)
+class BmpHeader:
+    """What a BMP's header says. `height` is negative for a top-down image; `pixels` is the
+    offset of the pixel data and `palette` the offset of the colour table."""
+
+    width: int
+    height: int
+    depth: int
+    compression: int
+    pixels: int
+    palette: int
+
+
+def read_bmp_header(data: bytes, source: str = "image") -> BmpHeader:
+    """Read a BMP's header, or raise UsageError if it isn't one Windows 98 can load."""
     if len(data) < 26 or data[:2] != b"BM":
-        raise ValueError(f"{source} is not a BMP file")
-    header = struct.unpack_from("<I", data, 14)[0]
-    if header not in BMP_HEADER_SIZES or len(data) < 14 + header:
-        raise ValueError(
-            f"{source} has a BMP header Windows 98 can't read (size {header})"
+        raise UsageError(f"{source} is not a BMP file")
+    size = struct.unpack_from("<I", data, 14)[0]
+    if size not in BMP_HEADER_SIZES or len(data) < 14 + size:
+        raise UsageError(
+            f"{source} has a BMP header Windows 98 can't read (size {size})"
         )
     compression = 0
-    if header == 12:
+    if size == 12:
         width, height, _, depth = struct.unpack_from("<HHHH", data, 18)
     else:
         width, height, _, depth, compression = struct.unpack_from("<iiHHI", data, 18)
     if width <= 0 or height == 0:
-        raise ValueError(f"{source} has no pixels ({width}x{height})")
+        raise UsageError(f"{source} has no pixels ({width}x{height})")
     if depth not in BMP_DEPTHS:
-        raise ValueError(
+        raise UsageError(
             f"{source} uses {depth} bits per pixel, which Windows 98 can't load"
         )
     # LoadImage on Windows 98 can crash reading past the end, so the pixels must all be there.
     pixels = struct.unpack_from("<I", data, 10)[0]
     needed = pixels + (width * depth + 31) // 32 * 4 * abs(height)
-    if compression in (BI_RGB, BI_BITFIELDS) and len(data) < needed:
-        raise ValueError(
+    if compression in BMP_COMPRESSIONS and len(data) < needed:
+        raise UsageError(
             f"{source} is cut short: {len(data)} bytes, its header needs {needed}"
         )
+    if compression in BMP_REFUSED:
+        raise UsageError(
+            f"{source} uses BMP compression {compression} (JPEG or PNG inside a BMP),"
+            " which Windows 98 can't load"
+        )
     if pixels >= len(data):
-        raise ValueError(f"{source} is cut short: its pixels would start past the end")
-    return width, abs(height)
+        raise UsageError(f"{source} is cut short: its pixels would start past the end")
+    return BmpHeader(width, height, depth, compression, pixels, 14 + size)
+
+
+def check_bmp(data: bytes, source: str = "image") -> tuple[int, int]:
+    """Return a BMP's (width, height), or raise UsageError if it isn't one Windows 98 can load."""
+    header = read_bmp_header(data, source)
+    return header.width, abs(header.height)
 
 
 def check_text(data: bytes, source: str = "text") -> bytes:
     """Check a text file Windows 98 Notepad can open, and return it with CRLF line ends."""
     if b"\0" in data:
-        raise ValueError(f"{source} has NUL bytes, so it isn't a text file")
-    if len(data) > TEXT_LIMIT:
-        raise ValueError(
-            f"{source} is {len(data)} bytes; Notepad on Windows 98 takes at most {TEXT_LIMIT}"
-        )
+        raise UsageError(f"{source} has NUL bytes, so it isn't a text file")
     try:
         data.decode("cp1252")
     except UnicodeDecodeError as error:
-        raise ValueError(
+        raise UsageError(
             f"{source} has bytes outside Windows 1252 (at {error.start})"
         ) from None
     # A bare LF shows as a box in Windows 98 Notepad.
-    return data.replace(b"\r\n", b"\n").replace(b"\n", b"\r\n")
+    data = data.replace(b"\r\n", b"\n").replace(b"\n", b"\r\n")
+    if len(data) > TEXT_LIMIT:
+        raise UsageError(
+            f"{source} is {len(data)} bytes after line ends are fixed;"
+            f" Notepad on Windows 98 takes at most {TEXT_LIMIT}"
+        )
+    return data

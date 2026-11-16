@@ -30,13 +30,48 @@ pause. Tested on the `ready` image, November 2026.
 from __future__ import annotations
 
 import struct
-import time
 
-from .protocol import Out
-from .win32 import SPI_SETWORKAREA, SW_HIDE, repaint_all, screen_size, work_area
+from .errors import GuestError, UsageError
+from .guest.protocol import Out
+from .guest.win32 import (
+    COLOR_DESKTOP,
+    HKCU,
+    KEY_SET_VALUE,
+    OCR_APPSTARTING,
+    OCR_CROSS,
+    OCR_HAND,
+    OCR_IBEAM,
+    OCR_NO,
+    OCR_NORMAL,
+    OCR_SIZEALL,
+    OCR_SIZENESW,
+    OCR_SIZENS,
+    OCR_SIZENWSE,
+    OCR_SIZEWE,
+    OCR_UP,
+    OCR_WAIT,
+    REG_SZ,
+    SPI_GETCOMBOBOXANIMATION,
+    SPI_GETGRADIENTCAPTIONS,
+    SPI_GETHOTTRACKING,
+    SPI_GETLISTBOXSMOOTHSCROLLING,
+    SPI_GETMENUANIMATION,
+    SPI_SETCOMBOBOXANIMATION,
+    SPI_SETDESKWALLPAPER,
+    SPI_SETGRADIENTCAPTIONS,
+    SPI_SETHOTTRACKING,
+    SPI_SETLISTBOXSMOOTHSCROLLING,
+    SPI_SETMENUANIMATION,
+    SPI_SETWORKAREA,
+    SPIF_SENDWININICHANGE,
+    SPIF_UPDATEINIFILE,
+    SW_HIDE,
+    colourref,
+    repaint_all,
+    screen_size,
+    work_area,
+)
 
-COLOR_DESKTOP = 1
-BLACK = 0x000000
 NAMED_COLOURS = {
     "teal": (0, 128, 128),
     "dark_red": (128, 0, 0),
@@ -45,45 +80,45 @@ NAMED_COLOURS = {
     "black": (0, 0, 0),
 }
 
-HKCU, KEY_SET_VALUE, REG_SZ = 0x80000001, 2, 1
-SPI_SETDESKWALLPAPER = 0x14
-SPIF_UPDATEINIFILE, SPIF_SENDWININICHANGE = 1, 2
 # (TileWallpaper, WallpaperStyle). The one place the styles are defined.
 STYLES = {"center": ("0", "0"), "tile": ("1", "0"), "stretch": ("0", "2")}
-DRIVE_CDROM, INVALID_FILE_ATTRIBUTES = 5, 0xFFFFFFFF
 
 # The interface effects as (name, get action, set action). Each set action
 # takes its on/off value in pvParam, so 0 turns it off.
 UI_EFFECTS = (
-    ("menu animation", 0x1002, 0x1003),
-    ("combo box animation", 0x1004, 0x1005),
-    ("list box smooth scrolling", 0x1006, 0x1007),
-    ("gradient captions", 0x1008, 0x1009),
-    ("hot tracking", 0x100E, 0x100F),
+    ("menu animation", SPI_GETMENUANIMATION, SPI_SETMENUANIMATION),
+    ("combo box animation", SPI_GETCOMBOBOXANIMATION, SPI_SETCOMBOBOXANIMATION),
+    (
+        "list box smooth scrolling",
+        SPI_GETLISTBOXSMOOTHSCROLLING,
+        SPI_SETLISTBOXSMOOTHSCROLLING,
+    ),
+    ("gradient captions", SPI_GETGRADIENTCAPTIONS, SPI_SETGRADIENTCAPTIONS),
+    ("hot tracking", SPI_GETHOTTRACKING, SPI_SETHOTTRACKING),
 )
 
 # Every pointer shape Windows 98 draws by itself: arrow, I-beam, wait, cross,
 # up arrow, the four resize arrows, move, no, hand and arrow-with-hourglass.
 POINTER_SHAPES = (
-    32512,
-    32513,
-    32514,
-    32515,
-    32516,
-    32642,
-    32643,
-    32644,
-    32645,
-    32646,
-    32648,
-    32649,
-    32650,
+    OCR_NORMAL,
+    OCR_IBEAM,
+    OCR_WAIT,
+    OCR_CROSS,
+    OCR_UP,
+    OCR_SIZENWSE,
+    OCR_SIZENESW,
+    OCR_SIZEWE,
+    OCR_SIZENS,
+    OCR_SIZEALL,
+    OCR_NO,
+    OCR_HAND,
+    OCR_APPSTARTING,
 )
 POINTER_SIZE = 32
 
 
-class DesktopError(RuntimeError):
-    """The guest didn't end up blank."""
+class DesktopError(GuestError):
+    """The guest didn't end up blank, or refused the wallpaper or pointer change."""
 
     def __init__(self, problems: list[str], lead: str = "the desktop isn't blank:"):
         self.problems = problems
@@ -103,27 +138,22 @@ def shell_windows(guest) -> tuple[int, int, int]:
 
 
 def resolve_colour(colour) -> tuple[int, int, int]:
-    """A colour name from NAMED_COLOURS or an (r, g, b) of ints 0..255, as a tuple. Raises ValueError."""
+    """A colour name from NAMED_COLOURS or an (r, g, b) of ints 0..255, as a tuple. Raises UsageError."""
     if isinstance(colour, str):
         if colour not in NAMED_COLOURS:
-            raise ValueError(
+            raise UsageError(
                 f"unknown colour {colour!r}; use one of {sorted(NAMED_COLOURS)} or (r, g, b)"
             )
         return NAMED_COLOURS[colour]
     try:
         rgb = tuple(colour)
     except TypeError:
-        raise ValueError(
+        raise UsageError(
             f"colour must be a name or (r, g, b), not {colour!r}"
         ) from None
     if len(rgb) != 3 or not all(type(c) is int and 0 <= c <= 255 for c in rgb):
-        raise ValueError(f"colour must be three ints from 0 to 255, not {colour!r}")
+        raise UsageError(f"colour must be three ints from 0 to 255, not {colour!r}")
     return rgb
-
-
-def colourref(rgb) -> int:
-    """The Win32 COLORREF: red in the low byte."""
-    return rgb[0] | rgb[1] << 8 | rgb[2] << 16
 
 
 def set_colour(guest, rgb) -> None:
@@ -142,7 +172,7 @@ def set_colour(guest, rgb) -> None:
         1, struct.pack("<I", COLOR_DESKTOP), struct.pack("<I", colourref(rgb))
     )
     if was_hidden:
-        user32.ShowWindow(shell_windows(guest)[2], SW_HIDE)
+        user32.ShowWindow(icons, SW_HIDE)
     guest.sync()  # every window's thread has handled WM_SYSCOLORCHANGE
     repaint_all(guest)
 
@@ -153,6 +183,11 @@ def set_wallpaper(guest, path: str, style: str) -> None:
     key = guest.advapi32.RegOpenKeyExA(
         HKCU, r"Control Panel\Desktop", 0, KEY_SET_VALUE, Out(4)
     )
+    if key.value != 0:
+        raise DesktopError(
+            [r"could not open Control Panel\Desktop in the registry"],
+            "the wallpaper failed:",
+        )
     hkey = struct.unpack("<I", key.buffers[0])[0]
     try:
         for name, value in (("TileWallpaper", tile), ("WallpaperStyle", mode)):
@@ -174,35 +209,6 @@ def set_wallpaper(guest, path: str, style: str) -> None:
     guest.sync()
 
 
-def cd_drive(guest) -> str | None:
-    """The CD drive as "D:\\", or None if the guest has none."""
-    mask = guest.kernel32.GetLogicalDrives().value
-    for i in range(26):
-        letter = f"{chr(65 + i)}:\\"
-        if mask >> i & 1 and guest.kernel32.GetDriveTypeA(letter).value == DRIVE_CDROM:
-            return letter
-    return None
-
-
-def wait_for_disc(guest, name: str, timeout: float = 2.0) -> str:
-    """Poll every 50 ms until `name` can be read on the CD; return its full path."""
-    deadline = time.monotonic() + timeout
-    while True:
-        letter = cd_drive(guest)
-        if (
-            letter
-            and guest.kernel32.GetFileAttributesA(letter + name).value
-            != INVALID_FILE_ATTRIBUTES
-        ):
-            return letter + name
-        if time.monotonic() >= deadline:
-            raise DesktopError(
-                [f"the CD with {name} did not show up in {timeout:g} s"],
-                "the wallpaper disc failed:",
-            )
-        time.sleep(0.05)
-
-
 def blank(guest, pointer: bool = False) -> None:
     """Turn the restored desktop into a black, empty screen, then check it.
 
@@ -211,7 +217,7 @@ def blank(guest, pointer: bool = False) -> None:
     """
     user32 = guest.user32
     taskbar, desk, icons = shell_windows(guest)
-    set_colour(guest, (0, 0, 0))
+    set_colour(guest, NAMED_COLOURS["black"])
     if icons:
         user32.ShowWindow(icons, SW_HIDE)
     if taskbar:
@@ -253,7 +259,7 @@ def check_blank(guest) -> list[str]:
     if desk and user32.IsWindowEnabled(desk).value:
         problems.append("the desktop takes input, so a right-click opens its menu")
     colour = user32.GetSysColor(COLOR_DESKTOP).value & 0xFFFFFF
-    if colour != BLACK:
+    if colour != colourref(NAMED_COLOURS["black"]):
         problems.append(f"the desktop colour is {colour:06x}, not black")
     width, height = screen_size(guest)
     area = work_area(guest)
@@ -280,9 +286,18 @@ def hide_pointer(guest) -> None:
     empty = user32.CreateCursor(
         0, 0, 0, POINTER_SIZE, POINTER_SIZE, b"\xff" * mask, b"\x00" * mask
     ).value
+    if not empty:
+        raise DesktopError(
+            ["CreateCursor returned no cursor, so the pointer can't be hidden"],
+            "the pointer failed:",
+        )
     try:
         for shape in POINTER_SHAPES:
             # SetSystemCursor takes over the handle it's given, so each gets a copy.
-            user32.SetSystemCursor(user32.CopyIcon(empty).value, shape)
+            if not user32.SetSystemCursor(user32.CopyIcon(empty).value, shape).value:
+                raise DesktopError(
+                    [f"SetSystemCursor failed for pointer shape {shape}"],
+                    "the pointer failed:",
+                )
     finally:
         user32.DestroyCursor(empty)

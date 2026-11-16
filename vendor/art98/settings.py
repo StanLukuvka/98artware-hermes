@@ -1,5 +1,9 @@
 """The one home of names and ports: built-in defaults, overridden by art98.toml.
 
+These are the client side's settings. How the containers run (mounts, VNC, the
+product key) is compose's, in compose.yaml and compose.override.yaml; where both
+need a value, art98.container.compose passes these to compose.
+
 Precedence: defaults < art98.toml < ART98_IMAGE (image only) < the --work flag.
 ART98_ENGINE and ART98_TRANSPORT are read where they always were, not here
 (ART98_TRANSPORT beats [vm] transport).
@@ -12,31 +16,29 @@ import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from .errors import Art98Error
+
 CONFIG_NAME = "art98.toml"
 # Ports INSIDE the image, fixed; the host-side ports are Settings fields.
 CONTAINER_CONTROL_PORT = 7598
 CONTAINER_VNC_PORT = 5900
+TRANSPORTS = ("unix", "tcp")
 
 
-class SettingsError(ValueError):
+class SettingsError(Art98Error, ValueError):
     pass
 
 
 @dataclass(frozen=True)
 class Settings:
-    container: str = "art98-vm"
     image: str = "localhost/art98:latest"
     work: str = "work"
-    bind: str = "127.0.0.1"
     connect: str | None = None
     transport: str | None = None
     token_file: str | None = None
     # The token itself; never from art98.toml.
     token: str | None = field(default=None, repr=False)
-    control: int = 7598
-    vnc: int = 5900
-    setup_vnc: int = 5998
-    source: Path | None = None
+    control: int = CONTAINER_CONTROL_PORT
     root: Path = Path(".")
 
     @property
@@ -45,10 +47,8 @@ class Settings:
 
     @property
     def connect_host(self) -> str:
-        """The host a client dials: `connect`, else `bind`, else loopback for a wildcard."""
-        if self.connect:
-            return self.connect
-        return "127.0.0.1" if self.bind in ("0.0.0.0", "::") else self.bind
+        """The host a client dials: `connect`, else loopback, where compose publishes."""
+        return self.connect or "127.0.0.1"
 
     @property
     def token_path(self) -> Path:
@@ -60,21 +60,16 @@ class Settings:
 
 SECTIONS = {
     "vm": {
-        "container": str,
         "image": str,
         "work": str,
         "transport": str,
         "token_file": str,
     },
     "ports": {
-        "bind": str,
         "connect": str,
         "control": int,
-        "vnc": int,
-        "setup_vnc": int,
     },
 }
-TRANSPORTS = ("unix", "tcp")  # also host.TRANSPORTS; settings cannot import host
 
 
 def find(start: Path | None = None) -> Path | None:
@@ -123,4 +118,4 @@ def load(work: Path | str | None = None) -> Settings:
         values["image"] = os.environ["ART98_IMAGE"]
     if work is not None:
         values["work"] = str(Path(work).resolve())
-    return Settings(**values, source=path, root=path.parent if path else Path.cwd())
+    return Settings(**values, root=path.parent if path else Path.cwd())

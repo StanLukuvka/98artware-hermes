@@ -4,7 +4,9 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
+from ..errors import UsageError
 from .space import STOCK, DesktopSpace
+from .units import pixel
 from .vectors import DL, LEFT, ORIGIN, RIGHT, Vec
 
 DEFAULT_BUFF = 8
@@ -14,11 +16,17 @@ class Spot:
     """A place on screen that is worked out when it is needed.
 
     Controls move with their windows, so a target such as a Paint tool is
-    located when an animation begins, not when the scene names it.
+    located when an animation begins, not when the scene names it. `window` is
+    the Win the place is on, when a Drag from it should repaint that window.
     """
 
-    def __init__(self, locate: Callable[[], tuple[float, float]]):
+    def __init__(
+        self,
+        locate: Callable[[], tuple[float, float]],
+        window=None,
+    ):
         self._locate = locate
+        self.window = window
 
     def point(self) -> Vec:
         return Vec(*self._locate())
@@ -64,12 +72,12 @@ class Box:
     @property
     def rect(self) -> tuple[int, int, int, int]:
         """(left, top, right, bottom), the same order as a Win32 RECT."""
-        x, y = round(self.x), round(self.y)
-        return x, y, x + round(self.width), y + round(self.height)
+        x, y = pixel(self.x), pixel(self.y)
+        return x, y, x + pixel(self.width), y + pixel(self.height)
 
     @property
     def size(self) -> tuple[int, int]:
-        return round(self.width), round(self.height)
+        return pixel(self.width), pixel(self.height)
 
     def get_center(self) -> Vec:
         return Vec(self.x + self.width / 2, self.y + self.height / 2)
@@ -164,7 +172,7 @@ class Prop(Box):
     @property
     def guest(self):
         if self.scene is None:
-            raise RuntimeError(
+            raise UsageError(
                 f"{type(self).__name__} is not on stage: add it to the scene first"
             )
         return self.scene.guest

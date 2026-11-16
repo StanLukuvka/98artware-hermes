@@ -2,16 +2,31 @@
 
 from __future__ import annotations
 
+import os
+import sys
 import warnings
 from dataclasses import dataclass
+
+from ..errors import UsageError
+from .units import clamp
+
+_PACKAGE = os.path.dirname(os.path.dirname(os.path.abspath(__file__))) + os.sep
+
+
+def _scene_stacklevel() -> int:
+    """The `stacklevel` that points a warning from `report` at the first frame outside art98."""
+    frame, level = sys._getframe(1), 1  # level 1 is `report`, which calls warn
+    while frame is not None and frame.f_code.co_filename.startswith(_PACKAGE):
+        frame, level = frame.f_back, level + 1
+    return level
 
 
 class PlacementWarning(UserWarning):
     """A window was asked for a size or place Windows would change, or lose."""
 
 
-class PlacementError(ValueError):
-    """The same, in strict mode."""
+class PlacementError(UsageError):
+    """A placement problem in strict mode: `DesktopSpace.report` raises it where it would warn."""
 
 
 @dataclass(frozen=True)
@@ -30,22 +45,6 @@ class DesktopSpace:
     work_area: tuple[int, int, int, int]  # (left, top, right, bottom)
     metrics: Metrics
     strict: bool = False  # a clamp or a lost window raises PlacementError
-
-    @property
-    def taskbar(self) -> tuple[int, int, int, int] | None:
-        """The strip of screen outside the work area, derived not read. None when
-        the work area is the whole screen (a blank desktop)."""
-        sw, sh = self.screen
-        left, top, right, bottom = self.work_area
-        if bottom < sh:
-            return 0, bottom, sw, sh
-        if top > 0:
-            return 0, 0, sw, top
-        if left > 0:
-            return 0, 0, left, sh
-        if right < sw:
-            return right, 0, sw, sh
-        return None
 
     @property
     def title_bar_offset(self) -> float:
@@ -76,7 +75,7 @@ class DesktopSpace:
             and self.metrics.min_track != (0, 0)
             and self.metrics.max_track != (0, 0)
         ):
-            given = (min(max(w, lo_w), hi_w), min(max(h, lo_h), hi_h))
+            given = (clamp(w, lo_w, hi_w), clamp(h, lo_h, hi_h))
         if given != size:
             self.report(
                 name,
@@ -102,11 +101,16 @@ class DesktopSpace:
             if reason in warned:
                 return
             warned.add(reason)
-        warnings.warn(f"{name}: {why}", PlacementWarning, stacklevel=4)
+        warnings.warn(
+            f"{name}: {why}", PlacementWarning, stacklevel=_scene_stacklevel()
+        )
 
 
-# lazy: the real Win98 values arrive with the first VM calibration (T6). Only
-# caption and frame are known (they match the fake guests); 0 limits mean
-# "unknown", so an unattached Box is never clamped. Used only as the default
-# for a Box that is not on a scene, never by a scene itself.
-STOCK = DesktopSpace((800, 600), (0, 0, 800, 572), Metrics(caption=18, size_frame=3))
+# STOCK is the answer before a scene has read the guest (`win32.calibrate`
+# builds the real one): the space a Scene starts with and resets to, and the
+# one an unattached Box uses. 0 limits mean "unknown", so such a Box is never
+# clamped; caption and frame are placeholders until then.
+TASKBAR_HEIGHT = 28
+STOCK = DesktopSpace(
+    (800, 600), (0, 0, 800, 600 - TASKBAR_HEIGHT), Metrics(caption=18, size_frame=3)
+)

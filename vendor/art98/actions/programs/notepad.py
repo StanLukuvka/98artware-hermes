@@ -4,11 +4,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from ... import guestfiles
-from ...win32 import WM_SETTEXT
+from ...guest import guestfiles
+from ...guest.win32 import EM_SETMODIFY, WM_SETTEXT
 from ..window.win import Win
-
-EM_SETMODIFY = 0x00B9
 
 
 def notepad_title(file: Path | str | None) -> str:
@@ -37,6 +35,10 @@ class Notepad(Win):
 
     command = "notepad.exe"
     window_class = "Notepad"
+    open_keyword = "open"
+    check_file = staticmethod(
+        guestfiles.check_text
+    )  # what a state's `open` file must pass
 
     def __init__(
         self,
@@ -51,16 +53,16 @@ class Notepad(Win):
         if self.open_file is not None:
             guestfiles.check_name(self.open_file.name)
             self._file_data = guestfiles.check_text(
-                self.open_file.read_bytes(), str(self.open_file)
+                guestfiles.read_host_file(self.open_file), str(self.open_file)
             )
         if title is None:
             title = notepad_title(self.open_file) if self.open_file is not None else ""
         super().__init__(title, at=at, size=size)
 
-    @classmethod
-    def from_state(cls, window) -> Notepad:
-        file = window.open.path if window.open else None
-        return cls(window.title, open=file, at=window.at, size=window.size)
+    @staticmethod
+    def default_title(file: Path | None) -> str:
+        """The title a state gives a Notepad window that names none."""
+        return notepad_title(file)
 
     def attach(self, scene) -> None:
         if self._file_data is not None:

@@ -4,11 +4,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from ..errors import Art98Error, UsageError
+
 ENCODING = "cp1252"
 PROTOCOL_VERSION = 1
 
 
-class FrameError(ValueError):
+class FrameError(Art98Error, ValueError):
     """A line did not carry a valid checksum."""
 
 
@@ -65,6 +67,8 @@ def encode_arg(arg: object) -> bytes:
     if isinstance(arg, bool):
         return b"1" if arg else b"0"
     if isinstance(arg, int):
+        if not -(2**31) <= arg < 2**32:
+            raise UsageError(f"{arg} does not fit in 32 bits")
         return b"%d" % (arg & 0xFFFFFFFF)
     if isinstance(arg, str):
         return _encode_string(arg)
@@ -72,7 +76,7 @@ def encode_arg(arg: object) -> bytes:
         return b"#" + bytes(arg).hex().encode()
     if isinstance(arg, Out):
         return b"&%d" % arg.size
-    raise TypeError(f"cannot send {type(arg).__name__} to the guest")
+    raise UsageError(f"cannot send {type(arg).__name__} to the guest")
 
 
 def encode_request(request_id: int, verb: str, args: tuple | list = ()) -> bytes:

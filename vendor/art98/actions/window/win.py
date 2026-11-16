@@ -2,28 +2,19 @@
 
 from __future__ import annotations
 
-import struct
-import time
+from pathlib import Path
 
-from ... import win32
 from ...base.props import Prop, Spot
 from ...base.vectors import DR, Vec
-from ...bridge import BridgeTimeout, Window
-from ...protocol import Out
-from ...win32 import (
-    GWL_STYLE,
-    SWP_NOACTIVATE,
-    SWP_NOMOVE,
-    SWP_NOSIZE,
-    SWP_NOZORDER,
-    WM_GETTEXT,
-    WM_GETTEXTLENGTH,
-    WM_SETTEXT,
-    WS_THICKFRAME,
-    window_rect,
-)
+from ...errors import GuestError, NotFound, UsageError
+from ...guest import win32
+from ...guest.bridge import Window, wait_for
+from ...guest.protocol import Out
+from ...guest.win32 import window_rect
 
-FIND_WINDOW_TIMEOUT = 15.0
+FIND_WINDOW_TIMEOUT = 15.0  # seconds a started program has to show its window
+FIND_POLL = 0.05  # seconds between looks at the guest's windows
+DEFAULT_INSET = 2  # pixels a corner spot sits inside the frame, so it hits the frame
 
 
 class Win(Prop):
@@ -32,10 +23,32 @@ class Win(Prop):
     Give it a `command` to start a program, or `title`, `class_name` or `hwnd`
     to take hold of a window that exists. `at` is the top left corner and
     `size` the outer size. Both are applied when the prop is added.
+
+    A program a state can open (see `actions/apps.py`) also sets `open_keyword`,
+    `check_file` and `default_title`, and inherits `from_state`.
     """
 
     command: str | None = None
     window_class: str | None = None
+    # The constructor keyword a state's `open` file is passed as.
+    open_keyword: str | None = None
+
+    @staticmethod
+    def check_file(data: bytes, source: str) -> None:
+        """Raise UsageError if a state's `open` file can't be opened by this program."""
+        raise NotImplementedError("a program a state can open sets check_file")
+
+    @staticmethod
+    def default_title(file: Path | None) -> str:
+        """The title a state gives this program's window when it names none."""
+        raise NotImplementedError("a program a state can open sets default_title")
+
+    @classmethod
+    def from_state(cls, window) -> Win:
+        """The prop for one window of a state file. The file's `show` is applied
+        by setstate once the prop is added, and read back by `refresh`."""
+        opened = {} if window.open is None else {cls.open_keyword: window.open.path}
+        return cls(window.title, at=window.at, size=window.size, **opened)
 
     def __init__(
         self,
@@ -53,57 +66,65 @@ class Win(Prop):
         self.hwnd = hwnd
         if command is not None:
             self.command = command
+        if (
+            self.command is None
+            and hwnd is None
+            and title is None
+            and self.class_name is None
+        ):
+            raise UsageError(
+                f"{type(self).__name__} needs a command to start, or a title,"
+                " class_name or hwnd to find a window"
+            )
+        self._by_hwnd = (
+            hwnd is not None
+        )  # a window given by handle can't be found again
         self._at, self._size = at, size
+        # Flags of the cycle refresh -> apply -> settle, see the comment above `refresh`.
         self._sent: tuple[int, int, int, int] | None = None
-        self._top_level = True  # control() sets False: no size checks on children
-        self._sizable = False  # WS_THICKFRAME, read at attach
-        self._maximized = False
         self._verify = False  # settle is waiting for the next apply
+        self.show = "normal"  # "normal", "minimized" or "maximized", as last read
+        self._top_level = True  # a control is not sized or settled: see `_child`
+        self._sizable = False  # WS_THICKFRAME, read at attach
         self._warned: set[str] = set()
 
     def attach(self, scene) -> None:
         super().attach(scene)
         if self.hwnd is None:
+            if self._by_hwnd:
+                raise NotFound(
+                    f"{type(self).__name__} was made from a window handle, and that"
+                    " window is gone: make a new one"
+                )
             pid = self.guest.spawn(self.command) if self.command else None
             self.hwnd = self._find(pid).hwnd
+        elif window_rect(self.guest, self.hwnd) is None:
+            raise NotFound(f"no window {self.hwnd:#x}")
         if self._top_level:
-            style = self.guest.user32.GetWindowLongA(self.hwnd, GWL_STYLE & 0xFFFFFFFF)
-            self._sizable = bool(style.value & WS_THICKFRAME)
+            self._sizable = bool(
+                win32.window_style(self.guest, self.hwnd) & win32.WS_THICKFRAME
+            )
         self.refresh()
         if self._size:
             self.width, self.height = self._size
         if self._at:
             self.x, self.y = self._at
         self.apply()
-        self.settle()
-        self.ready()
+        if self._top_level:
+            self.settle()
+            self.ready()
 
     def _find(self, pid: int | None) -> Window:
-        deadline = time.monotonic() + FIND_WINDOW_TIMEOUT
-        while True:
-            window = self._look(pid)
-            if window is not None:
-                return window
-            if time.monotonic() >= deadline:
-                raise BridgeTimeout(self._not_found(pid))
-            time.sleep(0.05)
+        found = wait_for(lambda: self._look(pid), FIND_WINDOW_TIMEOUT, FIND_POLL)
+        if found is None:
+            raise NotFound(f"{self._not_found(pid)} (waited {FIND_WINDOW_TIMEOUT:g} s)")
+        return found
 
     def _look(self, pid: int | None) -> Window | None:
         """One look at the guest's windows: the one wanted, or None. A subclass
         can raise here to fail early."""
         for window in self.guest.windows():
-            if (
-                window.visible
-                and (pid is None or window.pid == pid)
-                and (
-                    self.title_text is None
-                    or self.title_text.lower() in window.title.lower()
-                )
-                and (
-                    self.class_name is None
-                    or self.class_name.lower() == window.class_name.lower()
-                )
-            ):
+            if window.visible and window.matches(self.title_text, self.class_name, pid):
                 return window
         return None
 
@@ -117,25 +138,38 @@ class Win(Prop):
         """Called once the window exists and has been placed."""
         self.guest.sync(self.hwnd)
 
+    # The place and show state, and what is still to send, are kept in step by a
+    # cycle: `refresh` reads the show state, sends any change still waiting (`apply`),
+    # then reads the place back. `settle` at the end of an animation sets `_verify`,
+    # so the next `apply` reads back once more and reports a place the guest did not
+    # give. `apply` clears `_verify` on every way out.
+
     def refresh(self) -> None:
-        """Read the real place back, after sending any change still waiting."""
+        """Read the real show state and place back, after sending any change still waiting."""
         if self.hwnd is None or self.scene is None:
             return
+        self.show = win32.show_state(self.guest, self.hwnd)
         if self._sent is not None:
             self.apply()
+        if self.show == "minimized":
+            return  # Windows parks an iconic window off the desktop: the last place stands
         rect = window_rect(self.guest, self.hwnd)
         if rect is None:
             return  # the window has gone, so the last known place stands
         left, top, right, bottom = rect
         self.set_rect(left, top, right - left, bottom - top)
-        self._sent = self.rect[0], self.rect[1], *self.size
+        self._sent = self._placement()
+
+    def _placement(self) -> tuple[int, int, int, int]:
+        """The place as the guest takes it: x, y, width and height."""
+        return (*self.rect[:2], *self.size)
 
     def repaint_if_moved(self) -> None:
         """Read the place back and repaint if the guest moved the window itself (a Drag)."""
-        before = (*self.rect[:2], *self.size)
+        before = self._placement()
         self.refresh()
-        if self.hwnd is not None and (*self.rect[:2], *self.size) != before:
-            # Dragging leaves stale icon-label pixels in the frame: experiments/host-checks/README.md (M7b)
+        if self.hwnd is not None and self._placement() != before:
+            # Dragging leaves stale icon-label pixels in the frame: experiments/host-checks/README.md (dev branch) (M7b)
             win32.repaint_window(self.guest, self.hwnd)
 
     def point(self) -> Vec:
@@ -149,10 +183,10 @@ class Win(Prop):
             self._read_back()
 
     def _send(self) -> None:
-        wanted = (*self.rect[:2], *self.size)
-        if wanted == self._sent or self.hwnd is None:
-            return
-        if not self._maximized:  # a maximised rect overhangs the screen by the frame
+        wanted = self._placement()
+        if wanted == self._sent or self.hwnd is None or self.show == "minimized":
+            return  # an iconic window keeps its change until it is restored
+        if self.show == "normal":  # a maximised rect overhangs the screen by the frame
             size = self.space.check_rect(
                 self._name(),
                 self.rect,
@@ -162,16 +196,16 @@ class Win(Prop):
             )
             if size != self.size:
                 self.width, self.height = size
-                wanted = (*self.rect[:2], *self.size)
+                wanted = self._placement()
                 if wanted == self._sent:
                     return
         x, y, width, height = wanted
-        flags = SWP_NOZORDER | SWP_NOACTIVATE
+        flags = win32.SWP_NOZORDER | win32.SWP_NOACTIVATE
         if self._sent and (width, height) == self._sent[2:]:
-            flags |= SWP_NOSIZE
+            flags |= win32.SWP_NOSIZE
         if self._sent and (x, y) == self._sent[:2]:
-            flags |= SWP_NOMOVE
-        # Moves leave stale pixels on the frame, so it is repainted (Bridge.move_window).
+            flags |= win32.SWP_NOMOVE
+        # Moves leave stale pixels on the frame, so place_window repaints it.
         win32.place_window(self.guest, self.hwnd, x, y, width, height, flags)
         self._sent = wanted
 
@@ -183,11 +217,12 @@ class Win(Prop):
 
         Run at the end of an animation, not per frame. A change still waiting
         (the finish hook runs before the frame's apply) is read back right after
-        it is sent, so the frame costs no extra SetWindowPos.
+        it is sent, so the frame costs no extra SetWindowPos. A window that is
+        maximized or minimized has no place to check.
         """
-        if self.hwnd is None or self.scene is None or self._maximized:
+        if self.hwnd is None or self.scene is None or self.show != "normal":
             return
-        if (*self.rect[:2], *self.size) != self._sent:
+        if self._placement() != self._sent:
             self._verify = True  # `apply` reads back once it has sent
         else:
             self._read_back()
@@ -206,6 +241,25 @@ class Win(Prop):
                 self._warned,
             )
 
+    # ---- window commands ----
+
+    def maximize(self) -> None:
+        """Fill the desktop with the window, as its maximize button does."""
+        self._system_command(win32.SC_MAXIMIZE)
+
+    def minimize(self) -> None:
+        """Send the window to the taskbar."""
+        self._system_command(win32.SC_MINIMIZE)
+
+    def restore(self) -> None:
+        """Bring a minimized or maximized window back to its normal size."""
+        self._system_command(win32.SC_RESTORE)
+
+    def _system_command(self, command: int) -> None:
+        win32.sys_command(self.guest, self.hwnd, command)
+        self.guest.sync(self.hwnd)
+        self.refresh()  # Windows moved and sized the window itself
+
     # ---- places to aim at ----
 
     @property
@@ -216,37 +270,30 @@ class Win(Prop):
             self.refresh()
             return self.x + self.width / 2, self.y + self.space.title_bar_offset
 
-        spot = Spot(locate)
-        spot.window = self  # a Drag from here knows which window it moves
-        return spot
+        return Spot(locate, window=self)  # a Drag from here moves this window
 
-    def corner(self, direction=DR, inset: int = 2) -> Spot:
-        """A corner or edge of the frame, which is where a window is resized from."""
+    def corner(self, direction=DR, inset: int = DEFAULT_INSET) -> Spot:
+        """A corner or edge of the frame, which is where a window is resized from.
+
+        `inset` is how many pixels inside the frame the spot sits, so the press
+        lands on the frame's grab area rather than just outside the window.
+        """
 
         def locate():
             self.refresh()
             return self.get_corner(direction) - Vec(direction[0], direction[1]) * inset
 
-        spot = Spot(locate)
-        spot.window = self  # a Drag from here resizes this window, so it is read back while Windows does it
-        return spot
+        # A Drag from here resizes this window, so it is read back while Windows does it.
+        return Spot(locate, window=self)
 
     def client(self, x: int, y: int) -> Spot:
         """A point given in the window's client coordinates."""
-
-        def locate():
-            point = struct.pack("<ii", x, y)
-            return struct.unpack(
-                "<ii", self.guest.user32.ClientToScreen(self.hwnd, point).buffers[0]
-            )
-
-        return Spot(locate)
+        return Spot(lambda: win32.client_to_screen(self.guest, self.hwnd, x, y))
 
     # ---- the live window ----
 
     def client_size(self) -> tuple[int, int]:
-        rect = self.guest.user32.GetClientRect(self.hwnd, Out(16)).buffers[0]
-        return struct.unpack("<iiii", rect)[2:]
+        return win32.client_size(self.guest, self.hwnd)
 
     def children(
         self, class_name: str | None = None, title: str | None = None
@@ -255,20 +302,27 @@ class Win(Prop):
         return [
             window
             for window in self.guest.windows(self.hwnd)
-            if (class_name is None or class_name.lower() == window.class_name.lower())
-            and (title is None or title.lower() in window.title.lower())
+            if window.matches(title, class_name)
         ]
 
     def control(self, class_name: str | None = None, title: str | None = None) -> Win:
-        """A child window as a prop, for clicking or moving."""
+        """A child window as a prop, for clicking or moving.
+
+        A control is not on the scene's list, so a revert does not reach it:
+        ask for it again after one.
+        """
         found = self.children(class_name, title)
         if not found:
-            raise LookupError(
-                f"no {class_name or 'child'} {title or ''} in window {self.hwnd:#x}"
-            )
-        child = Win(hwnd=found[0].hwnd)
-        child._top_level = False
+            what = " ".join(filter(None, (class_name or "child", title)))
+            raise NotFound(f"no {what} in window {self.hwnd:#x}")
+        child = Win._child(found[0].hwnd)
         child.attach(self.scene)
+        return child
+
+    @staticmethod
+    def _child(hwnd: int) -> Win:
+        child = Win(hwnd=hwnd)
+        child._top_level = False  # no size checks, settle or ready for a control
         return child
 
     @property
@@ -277,14 +331,16 @@ class Win(Prop):
         return self._read_text(self.hwnd)
 
     def _read_text(self, hwnd: int) -> str:
-        length = self.guest.user32.SendMessageA(hwnd, WM_GETTEXTLENGTH, 0, 0).value
+        length = self.guest.user32.SendMessageA(
+            hwnd, win32.WM_GETTEXTLENGTH, 0, 0
+        ).value
         result = self.guest.user32.SendMessageA(
-            hwnd, WM_GETTEXT, length + 1, Out(length + 1)
+            hwnd, win32.WM_GETTEXT, length + 1, Out(length + 1)
         )
         return result.buffers[0][: result.value].decode("cp1252", errors="replace")
 
     def set_text(self, text: str) -> None:
-        self.guest.user32.SendMessageA(self.hwnd, WM_SETTEXT, 0, text)
+        self.guest.user32.SendMessageA(self.hwnd, win32.WM_SETTEXT, 0, text)
 
     @property
     def edit_hwnd(self) -> int:
@@ -309,14 +365,20 @@ class Win(Prop):
         self.guest.sync()
         pointer.place(home)
         if user32.GetForegroundWindow().value != self.hwnd:
-            raise RuntimeError(
+            raise GuestError(
                 f"could not activate window {self.hwnd:#x}: is it covered?"
             )
 
     def bring_to_front(self) -> None:
         """Raise the window without activating it."""
         self.guest.user32.SetWindowPos(
-            self.hwnd, 0, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE
+            self.hwnd,
+            win32.HWND_TOP,
+            0,
+            0,
+            0,
+            0,
+            win32.SWP_NOMOVE | win32.SWP_NOSIZE | win32.SWP_NOACTIVATE,
         )
 
     def close(self) -> None:
@@ -329,4 +391,4 @@ class Win(Prop):
     def forget(self) -> None:
         # The window went with the revert. Adding the prop again opens a new one.
         super().forget()
-        self.hwnd, self._sent, self._maximized = None, None, False
+        self.hwnd, self._sent, self.show = None, None, "normal"

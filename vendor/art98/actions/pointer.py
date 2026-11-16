@@ -6,14 +6,22 @@ is real input: Windows routes it, so menus open and windows drag themselves.
 
 from __future__ import annotations
 
-from .. import win32
 from ..base.animation import Animation, path_function
 from ..base.props import Prop, Spot, point_of
 from ..base.rate_functions import smooth
-from ..base.vectors import Vec, lerp
-from ..win32 import MOUSE_BUTTONS, cursor_pos
+from ..base.units import clamp, lerp
+from ..base.vectors import Vec
+from ..errors import UsageError
+from ..guest import win32
 
-BUTTONS = MOUSE_BUTTONS
+# Button timings are in seconds, so a scene's run_time= doesn't change them. Each
+# is turned into a share of run_time by `PointerAction.at_seconds`.
+CLICK_HOLD = 0.065  # seconds a click holds the button down
+DOUBLE_CLICK_HOLD = (
+    0.045  # seconds each press of a double click holds; presses are 0.09 s apart
+)
+# A pen's travel to the start of a path takes at most this share of the run time.
+STROKE_TRAVEL_CAP = 0.5
 
 
 class Pointer(Prop):
@@ -25,11 +33,11 @@ class Pointer(Prop):
         super().attach(scene)
         self.refresh()
         self._sent = self.get_center().rounded()
-        # A fresh boot shows a brighter, pointerless desktop until the first move: experiments/first-frame/README.md
+        # A fresh boot shows a brighter, pointerless desktop until the first move: experiments/first-frame/README.md (dev branch)
         self.guest.user32.SetCursorPos(*self._sent)
 
     def refresh(self) -> None:
-        self.x, self.y = cursor_pos(self.guest)
+        self.x, self.y = win32.cursor_pos(self.guest)
 
     def apply(self) -> None:
         wanted = self.get_center().rounded()
@@ -50,14 +58,10 @@ class Pointer(Prop):
 
 
 def _span(progress: float, start: float, end: float) -> float:
-    """How far progress is through the stretch from start to end."""
-    return (
-        0.0
-        if progress <= start
-        else 1.0
-        if progress >= end
-        else (progress - start) / (end - start)
-    )
+    """How far progress is through the stretch from start to end, from 0 to 1."""
+    if end <= start:  # an empty stretch is done as soon as progress reaches it
+        return 0.0 if progress <= start else 1.0
+    return clamp((progress - start) / (end - start), 0.0, 1.0)
 
 
 class PointerAction(Animation):
@@ -83,10 +87,18 @@ class PointerAction(Animation):
     def schedule(self) -> list:
         return []
 
-    def update(self, progress: float) -> None:
+    def at_seconds(self, seconds: float) -> float:
+        """The share of run_time that `seconds` makes up, so an event keeps its real timing."""
+        return seconds / self.run_time if self.run_time else 1.0
+
+    def travel_to_start(self, progress: float) -> None:
+        """Carry the pointer from where it was to `self.end`, over the travel stretch."""
         self.pointer.place(
             lerp(self.start, self.end, self.rate_func(_span(progress, 0, self.travel)))
         )
+
+    def update(self, progress: float) -> None:
+        self.travel_to_start(progress)
         self.fire(progress)
 
     def fire(self, progress: float) -> None:
@@ -112,9 +124,11 @@ class Hover(PointerAction):
     def __init__(
         self, target, *, hold: float = 1.0, travel_time: float = 0.5, **kwargs
     ):
+        if "run_time" in kwargs:
+            raise UsageError("Hover takes hold= and travel_time=, not run_time=")
         super().__init__(target, **kwargs)
         self.run_time = travel_time + hold
-        self.travel = travel_time / self.run_time
+        self.travel = travel_time / self.run_time if self.run_time else 0.0
 
 
 class Click(PointerAction):
@@ -128,9 +142,13 @@ class Click(PointerAction):
         super().__init__(target, **kwargs)
         if button is not None:
             self.button = button
+        win32.check_mouse_button(self.button)
 
     def schedule(self) -> list:
-        return [(self.travel, self._press), (0.84, self._release)]
+        return [
+            (self.travel, self._press),
+            (self.travel + self.at_seconds(CLICK_HOLD), self._release),
+        ]
 
     def _press(self) -> None:
         self.pointer.press(self.button)
@@ -146,21 +164,24 @@ class RightClick(Click):
 
 
 class DoubleClick(Click):
-    """Two clicks, a few frames apart.
+    """Two clicks, one after the other.
 
-    Windows counts a double click by its own clock (500 ms), so both clicks
-    fall inside the same short stretch of the run time.
+    Windows counts a double click by its own clock (500 ms). The presses here
+    are 0.09 s apart at any run_time, so Windows sees one double click.
     """
 
     run_time = 0.75
     travel = 0.66
 
     def schedule(self) -> list:
+        hold = self.at_seconds(DOUBLE_CLICK_HOLD)
+        first_release = self.travel + hold
+        second_press = first_release + hold
         return [
-            (0.66, self._press),
-            (0.72, self._release),
-            (0.78, self._press),
-            (0.84, self._release),
+            (self.travel, self._press),
+            (first_release, self._release),
+            (second_press, self._press),
+            (second_press + hold, self._release),
         ]
 
 
@@ -177,15 +198,20 @@ class Drag(PointerAction):
 
     def __init__(self, source, to=None, *, by=None, button: str = "left", **kwargs):
         if (to is None) == (by is None):
-            raise ValueError("Drag needs either to= or by=")
+            raise UsageError("Drag needs either to= or by=")
         super().__init__(source, **kwargs)
+        win32.check_mouse_button(button)
         self.to, self.by, self.button = to, by, button
         self.grab = self.goal = Vec(0, 0)
-        self.window = getattr(source, "window", None)
+        # The Win a title bar or corner belongs to, so the drag can read it back.
+        self.window = source.window if isinstance(source, Spot) else None
 
-    def schedule(self) -> list:
+    def begin(self, scene) -> None:
+        super().begin(scene)
         self.grab = self.end
         self.goal = self.grab + self.by if self.by is not None else point_of(self.to)
+
+    def schedule(self) -> list:
         return [
             (self.travel, self._take_hold),
             (self.drop, lambda: self.pointer.release(self.button)),
@@ -197,13 +223,7 @@ class Drag(PointerAction):
 
     def update(self, progress: float) -> None:
         if progress < self.travel:
-            self.pointer.place(
-                lerp(
-                    self.start,
-                    self.grab,
-                    self.rate_func(_span(progress, 0, self.travel)),
-                )
-            )
+            self.travel_to_start(progress)
             return
         self.fire(self.travel)
         carried = self.rate_func(_span(progress, self.travel, self.drop))
@@ -229,21 +249,32 @@ class Stroke(PointerAction):
     """
 
     run_time = 2.0
-    travel_time = 0.4
 
     def __init__(
-        self, path, *, button: str = "left", steps_per_frame: int = 4, **kwargs
+        self,
+        path,
+        *,
+        button: str = "left",
+        steps_per_frame: int = 4,
+        travel_time: float = 0.4,
+        **kwargs,
     ):
         super().__init__(None, **kwargs)
+        win32.check_mouse_button(button)
+        if steps_per_frame < 1:
+            raise UsageError(f"steps_per_frame is {steps_per_frame}; use 1 or more")
         self.path = path_function(path)
         self.button = button
         self.steps = steps_per_frame
+        self.travel_time = travel_time
         self._done = 0.0
 
     def begin(self, scene) -> None:
         self.target = Spot(lambda: self.path(0))
         self.travel = (
-            min(0.5, self.travel_time / self.run_time) if self.run_time else 0.0
+            min(STROKE_TRAVEL_CAP, self.travel_time / self.run_time)
+            if self.run_time
+            else 0.0
         )
         self._done = 0.0
         super().begin(scene)

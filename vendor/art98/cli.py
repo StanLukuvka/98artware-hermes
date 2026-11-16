@@ -9,19 +9,19 @@ import sys
 import traceback
 from pathlib import Path
 
-from . import freshness, service
-from .bridge import BridgeError
-from .container.host import ContainerError
-from .desktop import DesktopError
-from .guestfiles import GuestBuildMissing, guest_build
-from .qemu import QemuError
-from .recorder import GIF_COLORS, GIF_FPS, RecorderError
-from .service import ServiceError
-from .session import ImageMissing
-from .settings import CONTAINER_CONTROL_PORT, SettingsError, load
-from .state import StateError
+from .container import freshness, service
+from .container.host import ENGINE
+from .errors import Art98Error
+from .guest.bridge import READY_TIMEOUT
+from .guest.guestfiles import guest_build
+from .output.gif import GIF_COLORS, GIF_DITHER, GIF_FPS, GIF_SCALE, GifOptions
+from .settings import CONTAINER_CONTROL_PORT, CONTAINER_VNC_PORT, load
 
-KEY_SECRET_FILE = Path("/run/secrets/art98_key")
+KEY_SECRET_FILE = Path(
+    "/run/secrets/art98_key"
+)  # compose.yaml's setup service mounts it
+# Set in compose.override.yaml: show the screen on VNC port 5900 in the container.
+VNC_ENV = "ART98_VNC"
 
 
 CONTAINER_NEEDS = {
@@ -35,7 +35,7 @@ def cmd_doctor(_args) -> int:
     from art98_setup import builder
 
     rows = builder.doctor()
-    name = os.environ.get("ART98_ENGINE") or "docker"
+    name = os.environ.get("ART98_ENGINE") or ENGINE
     engine = shutil.which(name)
     missing = [tool for tool, path, _ in rows if not path]
     local_only = [tool for tool in missing if tool not in CONTAINER_NEEDS]
@@ -50,15 +50,15 @@ def cmd_doctor(_args) -> int:
         print(f"{tool:24} {path or 'missing'}{note}")
     print(f"{'/dev/kvm':24} not used: Windows 98 runs under software emulation")
     print(
-        f"{name:24} {engine or 'missing'} (for `art98 up` and `art98 vm`"
-        f"{'' if engine else '; on a Podman host, install podman-docker'})"
+        f"{name:24} {engine or 'missing'} (for `art98 up` and `art98 vm`, as `{name} compose`"
+        f"{'' if engine else '; on a Podman host, install podman-docker and docker-compose'})"
     )
     if local_ok and container_ok:
         print("\nEverything is usable, here and in the container.")
     elif local_ok:
         print(
-            "\n`art98 setup` is usable here. For `art98 up` and `art98 vm` install docker, "
-            "or podman-docker on a Podman host."
+            "\n`art98 setup` is usable here. For `art98 up` and `art98 vm` install Docker "
+            "and its compose plugin, or podman-docker and docker-compose on a Podman host."
         )
     elif container_ok:
         print(
@@ -81,13 +81,13 @@ def cmd_doctor(_args) -> int:
 def _product_key(args) -> str | None:
     if args.key or os.environ.get("ART98_PRODUCT_KEY"):
         return args.key or os.environ.get("ART98_PRODUCT_KEY")
-    if KEY_SECRET_FILE.exists():  # mounted in by `art98 up`
+    if KEY_SECRET_FILE.exists():
         return KEY_SECRET_FILE.read_text().strip() or None
     return None
 
 
 def cmd_setup(args) -> int:
-    from art98_setup.builder import Setup, SetupError
+    from art98_setup.builder import Setup
 
     key = _product_key(args)
     work = load(work=args.work).work_dir
@@ -97,29 +97,11 @@ def cmd_setup(args) -> int:
         iso=args.iso,
         product_key=key,
         disk_mb=args.disk_mb,
-        watch=args.watch,
+        watch=args.watch or bool(os.environ.get(VNC_ENV)),
     )
-    try:
-        tool.run(args.from_stage)
-    except SetupError as error:
-        print(f"error: {error}", file=sys.stderr)
-        return 1
+    tool.run(args.from_stage)
     print(f"Ready: {work}")
     return 0
-
-
-RUN_ERRORS = (
-    ImageMissing,
-    ContainerError,
-    RecorderError,
-    StateError,
-    DesktopError,
-    BridgeError,
-    QemuError,
-    GuestBuildMissing,
-    ServiceError,
-    SettingsError,
-)
 
 
 def _scene_frame(error: BaseException, path: Path) -> str:
@@ -142,7 +124,7 @@ def _guarded(run, extra: tuple = ()):
         except KeyboardInterrupt:
             print("interrupted", file=sys.stderr)
             return 130
-        except (*RUN_ERRORS, *extra) as error:
+        except (Art98Error, *extra) as error:
             if os.environ.get("ART98_TRACE"):
                 raise
             where = getattr(error, "art98_where", "")
@@ -196,19 +178,23 @@ def cmd_render(args) -> int:
     scene = _load_scene(args.file, args.scene)
     settings = load(args.work)
     freshness.warn(settings.work_dir)
+    given = {
+        "fps": args.gif_fps,
+        "colors": args.gif_colors,
+        "scale": args.gif_scale,
+        "dither": args.gif_dither,
+    }
+    options = GifOptions(**{k: v for k, v in given.items() if v is not None})
     try:
         with service.attach(settings, wait=args.wait) as session:
             written = render(
                 scene,
                 args.output,
                 gif=args.gif,
-                gif_fps=args.gif_fps,
-                gif_colors=args.gif_colors,
-                gif_scale=args.gif_scale,
-                gif_dither=args.gif_dither,
+                gif_options=options,
                 session=session,
             )
-    except RUN_ERRORS as error:
+    except Art98Error as error:
         error.art98_where = _scene_frame(error, args.file)
         raise
     print(f"Wrote {written}" + (f" and {args.gif}" if args.gif else ""))
@@ -222,7 +208,7 @@ def cmd_serve(args) -> int:
         args.work,
         port=args.port,
         token_file=args.token_file,
-        vnc=args.vnc,
+        vnc=args.vnc or bool(os.environ.get(VNC_ENV)),
         ready_timeout=args.ready_timeout,
         unix=args.unix,
     )
@@ -234,15 +220,13 @@ def cmd_up(args) -> int:
     return up(
         args.work,
         iso=args.iso,
-        watch=args.watch,
         rebuild=args.rebuild,
-        vnc_port=args.vnc_port,
         disk_mb=args.disk_mb,
     )
 
 
 def cmd_vm_start(args) -> int:
-    service.start(load(args.work), vnc=args.vnc)
+    service.start(load(args.work))
     return 0
 
 
@@ -285,6 +269,8 @@ def _wait_option(command) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
+    from art98_setup.builder import DISK_MB
+
     parser = argparse.ArgumentParser(prog="art98")
     commands = parser.add_subparsers(dest="command", required=True)
 
@@ -302,14 +288,16 @@ def main(argv: list[str] | None = None) -> int:
         help="folder for the prepared image (default: [vm] work from art98.toml)",
     )
     command.add_argument(
-        "--disk-mb", type=int, default=2047, help="virtual disk size in MB"
+        "--disk-mb", type=int, default=DISK_MB, help="virtual disk size in MB"
     )
     command.add_argument(
         "--from",
         dest="from_stage",
         help="redo this step and everything after it: vm, setup, init_api or ready",
     )
-    command.add_argument("--watch", action="store_true", help="show the VM's screen")
+    command.add_argument(
+        "--watch", action="store_true", help=f"show the VM's screen (or set {VNC_ENV})"
+    )
     command.set_defaults(run=_guarded(cmd_setup))
 
     command = commands.add_parser("ping", help="talk to the agent on the running VM")
@@ -326,21 +314,25 @@ def main(argv: list[str] | None = None) -> int:
     command.add_argument("--gif", type=Path, help="write a GIF as well")
     command.add_argument("--work", type=Path, default=None, help=WORK_HELP)
     command.add_argument(
-        "--gif-fps", type=int, default=GIF_FPS, help="GIF frames per second"
+        "--gif-fps", type=int, help=f"GIF frames per second (default {GIF_FPS})"
     )
     command.add_argument(
-        "--gif-colors", type=int, default=GIF_COLORS, help="GIF palette size"
+        "--gif-colors", type=int, help=f"GIF palette size (default {GIF_COLORS})"
     )
     command.add_argument(
         "--gif-scale",
         type=float,
-        default=1.0,
-        help="GIF size relative to the video (0.5 = half width and height)",
+        help=(
+            "GIF size relative to the video, 0.5 = half width and height "
+            f"(default {GIF_SCALE})"
+        ),
     )
     command.add_argument(
         "--gif-dither",
-        default="none",
-        help="ffmpeg paletteuse dither: none, bayer, sierra2_4a...",
+        help=(
+            "ffmpeg paletteuse dither: none, bayer, sierra2_4a... "
+            f"(default {GIF_DITHER})"
+        ),
     )
     _wait_option(command)
     command.set_defaults(run=_guarded(cmd_render))
@@ -358,37 +350,22 @@ def main(argv: list[str] | None = None) -> int:
     ):
         sub = vm.add_parser(name, help=text, description=text)
         sub.add_argument("--work", type=Path, default=None, help=WORK_HELP)
-        if name == "start":
-            sub.add_argument(
-                "--vnc",
-                action="store_true",
-                help="show the screen on VNC at [ports] bind:vnc from art98.toml; "
-                "view only, fixed at start",
-            )
         sub.set_defaults(run=_guarded(run))
 
     text = "from your disc and key to a working desktop, in the art98 container"
     command = commands.add_parser("up", help=text, description=text)
     command.add_argument(
-        "--iso", type=Path, help="your Windows 98 SE disc image, for setup"
+        "--iso",
+        type=Path,
+        help="your Windows 98 SE disc image, for setup (or mount it in "
+        "compose.override.yaml)",
     )
     command.add_argument("--work", type=Path, default=None, help=WORK_HELP)
-    command.add_argument(
-        "--watch",
-        action="store_true",
-        help="show setup's screen over VNC on a loopback port",
-    )
-    command.add_argument(
-        "--vnc-port",
-        type=int,
-        default=None,
-        help="host port for --watch (default: [ports] setup_vnc from art98.toml)",
-    )
     command.add_argument(
         "--rebuild", action="store_true", help="rebuild the container image"
     )
     command.add_argument(
-        "--disk-mb", type=int, default=2047, help="virtual disk size in MB"
+        "--disk-mb", type=int, default=DISK_MB, help="virtual disk size in MB"
     )
     command.set_defaults(run=_guarded(cmd_up, extra=(FileNotFoundError,)))
 
@@ -413,13 +390,15 @@ def main(argv: list[str] | None = None) -> int:
         "--token-file", type=Path, help="default /run/secrets/art98_token"
     )
     command.add_argument(
-        "--vnc", action="store_true", help="show the screen on VNC port 5900"
+        "--vnc",
+        action="store_true",
+        help=f"show the screen on VNC port {CONTAINER_VNC_PORT} (or set {VNC_ENV})",
     )
     command.add_argument(
         "--ready-timeout",
         type=float,
-        default=60.0,
-        help="seconds to wait for the guest agent after boot (default 60)",
+        default=READY_TIMEOUT,
+        help=f"seconds to wait for the guest agent after boot (default {READY_TIMEOUT:g})",
     )
     command.set_defaults(run=cmd_serve)
 

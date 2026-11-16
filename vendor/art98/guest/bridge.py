@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import socket
-import struct
 import threading
 import time
 from collections import deque
@@ -12,6 +11,7 @@ from itertools import count
 from pathlib import Path
 from typing import Self
 
+from ..errors import Art98Error
 from .protocol import (
     PROTOCOL_VERSION,
     FrameError,
@@ -20,20 +20,13 @@ from .protocol import (
     parse_values,
     unframe,
 )
-from .win32 import RDW_REPAINT_ALL, SWP_NOSIZE, SWP_NOZORDER
 
 DEFAULT_TIMEOUT = 10.0
+READY_TIMEOUT = 60.0  # wait_ready: the agent answering after a boot
 CHUNK_SIZE = 4096
 
-ENUM_SETTINGS_END_OF_LIST = 0
-CDS_UPDATEREGISTRY = 1
-DEVMODE_SIZE = 156
-DM_BITSPERPEL = 0x00040000
-DM_PELSWIDTH = 0x00080000
-DM_PELSHEIGHT = 0x00100000
 
-
-class BridgeError(RuntimeError):
+class BridgeError(Art98Error, RuntimeError):
     """The guest refused a request, or the link went away."""
 
 
@@ -43,6 +36,19 @@ class BridgeTimeout(BridgeError):
 
 class GuestCrashed(BridgeError):
     """The agent crashed while a request was open. It restarts by itself."""
+
+
+def wait_for(look, timeout: float, poll: float):
+    """Call `look` every `poll` seconds until it returns something but None, or
+    `timeout` seconds pass. Returns what `look` returned, or None on timeout."""
+    deadline = time.monotonic() + timeout
+    while True:
+        found = look()
+        if found is not None:
+            return found
+        if time.monotonic() >= deadline:
+            return None
+        time.sleep(poll)
 
 
 @dataclass
@@ -81,6 +87,20 @@ class Window:
             v - (1 << 32) if v & 0x80000000 else v for v in (left, top, right, bottom)
         )
         return cls(hwnd, pid, bool(visible), rect, class_name, title)
+
+    def matches(
+        self,
+        title: str | None = None,
+        class_name: str | None = None,
+        pid: int | None = None,
+    ) -> bool:
+        """Whether this window fits each filter given (None accepts any): a title
+        as a substring, a class and a pid. Case is ignored. Visibility is not checked."""
+        return (
+            (pid is None or self.pid == pid)
+            and (title is None or title.lower() in self.title.lower())
+            and (class_name is None or class_name.lower() == self.class_name.lower())
+        )
 
 
 @dataclass
@@ -222,6 +242,10 @@ class Bridge:
             self._fail_all(
                 GuestCrashed(f"agent crashed: code {code:#x} at {address:#x}")
             )
+        elif name == "BADFRAME":
+            # The frame has no id, so fail every open request now rather than
+            # letting the one that was garbled wait out its timeout.
+            self._fail_all(BridgeError("the agent got a corrupt request line"))
         with self._cond:
             self._events.append((name, values))
             self._cond.notify_all()
@@ -358,7 +382,7 @@ class Bridge:
         """Return the guest's tick count."""
         return self.request("PING", timeout=timeout)[0][0]
 
-    def wait_ready(self, timeout: float = 60.0) -> None:
+    def wait_ready(self, timeout: float = READY_TIMEOUT) -> None:
         deadline = time.monotonic() + timeout
         while True:
             try:
@@ -386,21 +410,21 @@ class Bridge:
         timeout: float = 10.0,
     ) -> Window:
         """Wait for a visible window. Titles match on a substring."""
-        deadline = time.monotonic() + timeout
-        while True:
-            for window in self.windows(parent):
-                if (
-                    window.visible
-                    and (title is None or title.lower() in window.title.lower())
-                    and (
-                        class_name is None
-                        or class_name.lower() == window.class_name.lower()
-                    )
-                ):
-                    return window
-            if time.monotonic() >= deadline:
-                raise BridgeTimeout(f"no window matching {title=} {class_name=}")
-            time.sleep(0.1)
+        found = wait_for(
+            lambda: next(
+                (
+                    window
+                    for window in self.windows(parent)
+                    if window.visible and window.matches(title, class_name)
+                ),
+                None,
+            ),
+            timeout,
+            poll=0.1,
+        )
+        if found is None:
+            raise BridgeTimeout(f"no window matching {title=} {class_name=}")
+        return found
 
     def processes(self) -> list[tuple[int, str]]:
         return [(row[0], row[1]) for row in self.request("PROCS")[1]]
@@ -435,39 +459,6 @@ class Bridge:
             data += chunk
             if not chunk or len(data) >= size:
                 return bytes(data)
-
-    def move_window(self, hwnd: int, x: int, y: int) -> None:
-        """Move a window, keeping its size and stacking order.
-
-        Moves on Windows 98 leave stale pixels along the window frame, and
-        SWP_NOCOPYBITS and SWP_FRAMECHANGED don't clear them, so it is repainted.
-        """
-        self.user32.SetWindowPos(hwnd, 0, x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER)
-        self.user32.RedrawWindow(hwnd, 0, 0, RDW_REPAINT_ALL)
-
-    def set_display_mode(
-        self, width: int, height: int, depth: int, persist: bool = True
-    ) -> None:
-        """Switch resolution, using a mode the video driver itself reports."""
-        mode = 0
-        while True:
-            blank = bytearray(DEVMODE_SIZE)
-            struct.pack_into("<H", blank, 36, DEVMODE_SIZE)
-            result = self.user32.EnumDisplaySettingsA(None, mode, blank)
-            if result.value == ENUM_SETTINGS_END_OF_LIST:
-                raise BridgeError(f"guest has no {width}x{height}x{depth} display mode")
-            devmode = bytearray(result.buffers[0])
-            bpp, w, h = struct.unpack_from("<III", devmode, 104)
-            if (w, h, bpp) == (width, height, depth):
-                break
-            mode += 1
-        struct.pack_into(
-            "<I", devmode, 40, DM_BITSPERPEL | DM_PELSWIDTH | DM_PELSHEIGHT
-        )
-        flags = CDS_UPDATEREGISTRY if persist else 0
-        result = self.user32.ChangeDisplaySettingsA(devmode, flags)
-        if result.signed < 0:
-            raise BridgeError(f"ChangeDisplaySettings failed with {result.signed}")
 
 
 __all__ = [

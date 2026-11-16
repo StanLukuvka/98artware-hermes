@@ -17,6 +17,7 @@ from .protocol import Out
 WM_SETTEXT, WM_GETTEXT, WM_GETTEXTLENGTH, WM_CLOSE = 0x000C, 0x000D, 0x000E, 0x0010
 WM_SYSCOMMAND = 0x0112
 WM_CHAR = 0x0102
+BM_CLICK = 0x00F5  # a button's press-and-release, as its own click would send
 VK_BACK = 8
 SC_MINIMIZE, SC_MAXIMIZE, SC_RESTORE = 0xF020, 0xF030, 0xF120
 # ShowWindow
@@ -60,8 +61,11 @@ COLOR_DESKTOP = 1  # GetSysColor / SetSysColors
 BITSPIXEL = 12  # GetDeviceCaps
 # controls
 EM_SETMODIFY = 0x00B9
-STM_SETICON, SS_ICON = 0x0170, 3
-MB_ICONINFORMATION = 0x40
+STM_SETICON, SS_ICON, SS_TYPEMASK = (
+    0x0170,
+    3,
+    0x1F,
+)  # SS_TYPEMASK: the bits of a static's type
 DIALOG_CLASS = "#32770"  # the window class of every message box and common dialog
 # registry
 HKCU, HKLM = 0x80000001, 0x80000002

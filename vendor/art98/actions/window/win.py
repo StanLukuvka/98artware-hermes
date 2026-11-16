@@ -106,6 +106,7 @@ class Win(Prop):
             )
         self.refresh()
         if self._size:
+            self._check_min_size()
             self.width, self.height = self._size
         if self._at:
             self.x, self.y = self._at
@@ -113,6 +114,22 @@ class Win(Prop):
         if self._top_level:
             self.settle()
             self.ready()
+
+    def min_size(self) -> tuple[int, int] | None:
+        """The least outer size this window can take, or None for no least.
+
+        Read once the window is on the desktop, before `size` is applied. A
+        subclass whose window has a stock size returns that.
+        """
+        return None
+
+    def _check_min_size(self) -> None:
+        minimum = self.min_size()
+        if minimum and (self._size[0] < minimum[0] or self._size[1] < minimum[1]):
+            raise UsageError(
+                f"size {self._size} is smaller than the least a {type(self).__name__}"
+                f" takes, {minimum}: its contents would be clipped"
+            )
 
     def _find(self, pid: int | None) -> Window:
         found = wait_for(lambda: self._look(pid), FIND_WINDOW_TIMEOUT, FIND_POLL)
@@ -327,8 +344,8 @@ class Win(Prop):
 
     @property
     def text(self) -> str:
-        """The window's text: a title bar, or an Edit control's contents."""
-        return self._read_text(self.hwnd)
+        """The window's text: a title bar, or an Edit control's contents (see `edit_hwnd`)."""
+        return self._read_text(self.edit_hwnd)
 
     def _read_text(self, hwnd: int) -> str:
         length = self.guest.user32.SendMessageA(
@@ -340,7 +357,7 @@ class Win(Prop):
         return result.buffers[0][: result.value].decode("cp1252", errors="replace")
 
     def set_text(self, text: str) -> None:
-        self.guest.user32.SendMessageA(self.hwnd, win32.WM_SETTEXT, 0, text)
+        self.guest.user32.SendMessageA(self.edit_hwnd, win32.WM_SETTEXT, 0, text)
 
     @property
     def edit_hwnd(self) -> int:

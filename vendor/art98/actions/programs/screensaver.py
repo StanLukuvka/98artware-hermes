@@ -5,16 +5,24 @@ from __future__ import annotations
 import time
 
 from ...base.vectors import Vec
-from ...errors import UsageError
+from ...errors import NotFound
+from ...guest import win32
 from ...guest.bridge import BridgeTimeout
 from ..window.win import Win
+
+STOP_TIMEOUT = 5.0  # seconds a screensaver has to end once the pointer moves
+STOP_POLL = 0.1  # seconds between the pointer moves that end it
+STOP_STEP = 40  # pixels each pointer move goes, towards the middle of the screen
 
 
 class Screensaver(Win):
     """A screensaver, started directly with /s.
 
-    Adding it starts it. Follow with `self.wait(seconds)`, because it runs by
-    itself. `stop` nudges the pointer, which is how a real one is dismissed.
+    Adding it starts it. It fills the screen, so it cannot be moved or sized:
+    `at`, `size` and the layout calls do nothing to it. In a scene's
+    `construct`, follow the add with `self.wait(seconds)`, because it runs by
+    itself. `stop` moves the pointer, which is how a real one is dismissed, and
+    puts the pointer back where it was.
     """
 
     window_class = "WindowsScreenSaverClass"
@@ -34,7 +42,7 @@ class Screensaver(Win):
 
     def __init__(self, name: str = "3D Pipes"):
         if name not in self.NAMES:
-            raise UsageError(
+            raise NotFound(
                 f"no screensaver {name!r}; the image has {', '.join(self.NAMES)}"
             )
         super().__init__(command=f'"C:\\WINDOWS\\SYSTEM\\{name}.scr" /s')
@@ -44,20 +52,32 @@ class Screensaver(Win):
         pass  # it paints for ever, so waiting for it to settle would only time out
 
     def apply(self) -> None:
-        pass
+        pass  # it fills the screen and has no place of its own to send
 
-    def stop(self, timeout: float = 5.0) -> None:
-        """Move the pointer, and wait for the screensaver to end."""
+    def stop(self, timeout: float = STOP_TIMEOUT) -> None:
+        """Move the pointer until the screensaver ends, then put it back.
+
+        Raises BridgeTimeout if it has not ended after `timeout` seconds.
+        """
+        guest = self.guest
         pointer = self.scene.pointer
         pointer.refresh()
+        home = pointer.get_center()
+        width, height = win32.screen_size(guest)
+        # Each move goes towards the middle, so the pointer stays on the screen.
+        steps = Vec(
+            -STOP_STEP if home.x > width / 2 else STOP_STEP,
+            -STOP_STEP if home.y > height / 2 else STOP_STEP,
+        )
         deadline = time.monotonic() + timeout
-        step = 40
-        while self.guest.user32.IsWindow(self.hwnd):
+        while guest.user32.IsWindow(self.hwnd).value:
             if time.monotonic() > deadline:
                 raise BridgeTimeout(f"{self.name} did not stop")
-            pointer.place(pointer.get_center() + Vec(step, step))
-            step = -step
-            time.sleep(0.1)
+            pointer.place(pointer.get_center() + steps)
+            steps = -steps
+            time.sleep(STOP_POLL)
+        pointer.place(home)
 
     def remove(self) -> None:
+        """Stop it. A screensaver still running after `stop`'s timeout is an error, not a warning."""
         self.stop()

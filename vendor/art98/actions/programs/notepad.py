@@ -4,8 +4,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from ...errors import GuestError, UsageError
 from ...guest import guestfiles
-from ...guest.win32 import EM_SETMODIFY, WM_SETTEXT
+from ...guest.win32 import EM_SETMODIFY
 from ..window.win import Win
 
 
@@ -50,6 +51,7 @@ class Notepad(Win):
     ):
         self.open_file = Path(open) if open is not None else None
         self._file_data = None
+        self._edit = None  # the Edit control, found in ready
         if self.open_file is not None:
             guestfiles.check_name(self.open_file.name)
             self._file_data = guestfiles.check_text(
@@ -71,21 +73,23 @@ class Notepad(Win):
         super().attach(scene)
 
     def ready(self) -> None:
-        self._edit = self.children("Edit")[0].hwnd
+        edits = self.children("Edit")
+        if not edits:
+            raise GuestError("Notepad has no Edit control")
+        self._edit = edits[0].hwnd
         super().ready()
 
     @property
     def edit_hwnd(self) -> int:
+        if self._edit is None:
+            raise UsageError("Notepad is not on stage yet: add it to the scene first")
         return self._edit
-
-    @property
-    def text(self) -> str:
-        return self._read_text(self._edit)
-
-    def set_text(self, text: str) -> None:
-        self.guest.user32.SendMessageA(self._edit, WM_SETTEXT, 0, text)
 
     def close(self) -> None:
         """Close without the save prompt, by marking the text as saved."""
-        self.guest.user32.SendMessageA(self._edit, EM_SETMODIFY, 0, 0)
+        self.guest.user32.SendMessageA(self.edit_hwnd, EM_SETMODIFY, 0, 0)
         super().close()
+
+    def forget(self) -> None:
+        super().forget()
+        self._edit = None

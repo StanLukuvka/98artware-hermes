@@ -147,6 +147,8 @@ Every visible top-level window has to be the desktop's or a prop's, or the rende
       self.add(my_computer)
   ```
 
+  This needs `desktop = "stock"`; the template's `"blank"` has no icons to click.
+
 - `RightClick` menus and `Hover` tooltips are claimed for you, but must be gone before the scene
   or a section ends: `Keys("esc")` for a menu, `Glide` away for a tooltip. `RightClick(..., menu=False)`
   is for a right click that opens no menu.
@@ -163,7 +165,7 @@ def construct(self):
 
 `section(name, method)` takes ASCII letters, digits, `_` and `-`, each name once, and nothing
 else (no frames, no `add`) may run between the calls. A full render saves the desktop at each
-boundary. Windows made in `setup` or a section need `self.add(win, id="pad")`, and a later
+boundary and, like `cut()`, also writes the pieces as `<output stem>-01.mp4` and on. Windows made in `setup` or a section need `self.add(win, id="pad")`, and a later
 section gets one back with `self.prop("pad")`. Only Picture and Notepad windows can be captured:
 `Paint`, `Minesweeper`, `Dialog` and `Screensaver` raise "can't be captured yet", so a scene with
 sections can't leave those on screen at a boundary (close them first). A scene with sections must
@@ -172,7 +174,8 @@ be saved as a file in `animations/`.
 Limits: a prop kept in `self.<attr>` by an earlier section is missing in a solo run, so use
 `prop(id)`. A menu, tooltip or claimed window up at a boundary refuses the capture. After typing
 into Notepad a solo section can differ in the Edit's horizontal scroll bar, and the taskbar clock
-can show another minute. Editing an earlier section or `setup` makes the captures stale: render the
+can show another minute. Things the guest times for itself, such as Notepad's caret blink,
+can differ too. Editing an earlier section or `setup` makes the captures stale: render the
 whole scene again.
 
 ### Rendering a scene
@@ -181,7 +184,7 @@ whole scene again.
 2. `art98_render` with `animation` and `output` (`.mp4` or `.gif`). If the file holds several
    scenes, name one with `scene`; the error lists them when you don't.
 3. Every scene starts from a fresh, clean desktop, whatever the live tools did before.
-4. A scene that calls `cut()` also writes its pieces as `<output>-01.mp4` and on.
+4. A scene that calls `cut()`, or has sections, also writes its pieces as `<output stem>-01.mp4` and on.
 5. To start from a saved desktop, put `self.set_state(...)` at the top of the scene. A state
    can hold Picture and Notepad windows (`id`, `at`, `size`, `show`, `open`); a Notepad can also
    have `text` (a file put in the Edit) and `selection` (`[start, end]`), and a top-level `stack`
@@ -195,13 +198,14 @@ whole scene again.
 ### Fixing a failed render
 
 Errors art98 raises on purpose are `UsageError` (a wrong argument),
-`NotFound` (a window id, menu label or child that isn't there), `GuestError` (the guest did
-something unexpected, so the step failed), `MissingFile` (all in `art98.errors`) and `StateError` (a bad state file, in `art98.state`).
+`NotFound` (a window id, menu label or child that isn't there),
+`SectionNotFound` (a `UsageError`: an unknown `section` name; the message lists the real ones), `GuestError` (the guest did
+something unexpected, so the step failed), `MissingFile` (in `art98.errors`, except `SectionNotFound`, which is in `art98.anim.scene`) and `StateError` (a bad state file, in `art98.state`).
 They are still `ValueError`, `KeyError`, `RuntimeError` or `FileNotFoundError` underneath, so
 `except` on those works too. The message says what to change.
 
 A failed render answers `render_failed` with the error and the scene's line, such as
-`NameError: ... (intro.py:18, in construct)`. `UntrackedWindow` and `ImplicitClose` name the window and prop; see "Windows must be tracked". Read the script with `read_file`, fix that line, save the
+`NameError: ... (intro.py:18, in construct)`. `UntrackedWindow` and `ImplicitClose` are `GuestError`s (in `art98.anim.scene`) that name the window and prop; see "Windows must be tracked". Read the script with `read_file`, fix that line, save the
 whole script again with `art98_save_scene` and `overwrite: true`, and render again. A file that defines no `Scene` class (a helper other scripts import)
 can't be rendered on its own.
 

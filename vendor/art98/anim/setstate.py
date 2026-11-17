@@ -2,9 +2,10 @@
 
 A Set is revert, apply, check. `Scene.set_state` runs it: it finds and loads the
 file, calls `Session.revert`, then `apply_state` here, then `check_state`. Apply
-opens the state's windows back to front, so each new one lands on top, and
-places the pointer last. Check reads back what the state describes and fails on
-any difference. Anything the state leaves out isn't checked.
+opens the state's windows in list order (the taskbar order), restacks them in
+the state's z-order when one is given, and places the pointer last. Check reads
+back what the state describes and fails on any difference. Anything the state
+leaves out isn't checked.
 """
 
 from __future__ import annotations
@@ -14,7 +15,7 @@ from ..base.units import clamp
 from ..desktop import set_colour, set_wallpaper
 from ..errors import GuestError
 from ..guest.disc import wait_for_disc
-from ..guest.guestfiles import check_bmp, read_bmp_header
+from ..guest.guestfiles import check_bmp, check_text, read_bmp_header
 from ..guest.win32 import (
     BITSPIXEL,
     COLOR_DESKTOP,
@@ -73,10 +74,11 @@ def apply_state(scene, state: State) -> dict:
     if desk and desk.wallpaper:
         scene.session.attach_disc({DISC_NAME: desk.wallpaper.data})
         set_wallpaper(guest, wait_for_disc(guest, DISC_NAME), desk.style)
+        scene._wallpaper = (desk.wallpaper, desk.style)  # for Scene.get_state
     props = {}
     for window in state.windows:
         prop = APPS[window.app].from_state(window)
-        scene.add(prop)
+        scene.add(prop, id=window.id)
         props[window.id] = prop
         # Maximizing activates the window, so it's done before the next one
         # opens on top of it, and the order stays back to front.
@@ -84,9 +86,20 @@ def apply_state(scene, state: State) -> dict:
             command = SW_SHOWMINNOACTIVE if window.show == "minimized" else SW_MAXIMIZE
             show_window(guest, prop.hwnd, command)
             prop.refresh()
+    # Creation order is the taskbar order and stays as it is. A stack only
+    # changes the z-order: raise the windows back to front, then activate the
+    # frontmost one so its title bar and taskbar button are highlighted.
+    if state.stack is not None:
+        shown = [w for w in state.back_to_front if w.show != "minimized"]
+        for window in shown:
+            props[window.id].bring_to_front()
+        if shown:
+            front = props[shown[-1].id]
+            if guest.user32.GetForegroundWindow().value != front.hwnd:
+                front.activate()
     # A window moving off another can leave desktop pixels on its frame, so
     # every window is repainted, back to front (design doc: "Stray pixels").
-    for window in state.windows:
+    for window in state.back_to_front:
         repaint_window(guest, props[window.id].hwnd)
     if state.pointer:
         scene.pointer.place(state.pointer)
@@ -246,6 +259,10 @@ def window_problems(guest, state: State, props: dict, found: dict) -> list[str]:
             problems.append(
                 f"{where}: title {window.title!r} wanted, the guest has {real.title!r}"
             )
+        if window.text is not None:
+            wanted = check_text(window.text.data).decode("cp1252")
+            if props[window.id].text != wanted:
+                problems.append(f"{where}: text differs from {window.text.path.name}")
         show = show_state(guest, real.hwnd)
         if show != window.show:
             problems.append(f"{where}: {window.show} wanted, the window is {show}")
@@ -264,10 +281,11 @@ def window_problems(guest, state: State, props: dict, found: dict) -> list[str]:
 
 
 def stacking_problems(state: State, props: dict, found: dict) -> list[str]:
-    """Top-level windows come back front to back, and the state lists them
-    back to front. Windows 98 sends a minimized window to the bottom, so only
-    the others are compared."""
-    stacked = [w for w in reversed(state.windows) if w.show != "minimized"]
+    """Top-level windows come back front to back. The state's `stack` gives
+    the back-to-front order (or the list order when there is no stack), so the
+    reverse of that is expected front to back. Windows 98 sends a minimized
+    window to the bottom, so only the others are compared."""
+    stacked = [w for w in reversed(state.back_to_front) if w.show != "minimized"]
     wanted = [props[w.id].hwnd for w in stacked]
     order = [hwnd for hwnd in found if hwnd in wanted]
     if len(order) != len(wanted) or order == wanted:

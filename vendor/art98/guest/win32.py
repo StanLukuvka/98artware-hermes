@@ -9,7 +9,7 @@ import struct
 from contextlib import contextmanager
 
 from ..base.space import DesktopSpace, Metrics
-from ..errors import UsageError
+from ..errors import GuestError, UsageError
 from .bridge import BridgeError
 from .protocol import Out
 
@@ -18,6 +18,7 @@ WM_SETTEXT, WM_GETTEXT, WM_GETTEXTLENGTH, WM_CLOSE = 0x000C, 0x000D, 0x000E, 0x0
 WM_SYSCOMMAND = 0x0112
 WM_CHAR = 0x0102
 BM_CLICK = 0x00F5  # a button's press-and-release, as its own click would send
+BM_SETSTATE = 0x00F3  # wParam 1 draws a button pressed, 0 draws it up again
 VK_BACK = 8
 SC_MINIMIZE, SC_MAXIMIZE, SC_RESTORE = 0xF020, 0xF030, 0xF120
 # ShowWindow
@@ -61,12 +62,16 @@ COLOR_DESKTOP = 1  # GetSysColor / SetSysColors
 BITSPIXEL = 12  # GetDeviceCaps
 # controls
 EM_SETMODIFY = 0x00B9
+EM_GETSEL = 0x00B0  # get Edit selection: start in the low word, end in the high word
+EM_SETSEL = 0x00B1  # set Edit selection: wParam start, lParam end
 STM_SETICON, SS_ICON, SS_TYPEMASK = (
     0x0170,
     3,
     0x1F,
 )  # SS_TYPEMASK: the bits of a static's type
 DIALOG_CLASS = "#32770"  # the window class of every message box and common dialog
+MENU_CLASS = "#32768"  # the window class of a popup menu
+TOOLTIP_CLASS = "tooltips_class32"  # the window class of a tooltip
 # registry
 HKCU, HKLM = 0x80000001, 0x80000002
 KEY_SET_VALUE = 2
@@ -124,6 +129,19 @@ def window_rect(guest, hwnd: int) -> tuple[int, int, int, int] | None:
     if not result:
         return None
     return struct.unpack("<iiii", result.buffers[0])
+
+
+def normal_rect(guest, hwnd: int) -> tuple[int, int, int, int]:
+    """A window's normal (restored) (left, top, right, bottom).
+
+    Windows keeps it while the window is maximized or minimized. Measured on the
+    art98 image, it equals GetWindowRect for a normal window.
+    """
+    # WINDOWPLACEMENT.length must be 44: a zeroed buffer makes the call fail.
+    result = guest.user32.GetWindowPlacement(hwnd, struct.pack("<I", 44) + bytes(40))
+    if result.value == 0:
+        raise GuestError(f"GetWindowPlacement failed for window {hwnd}")
+    return tuple(struct.unpack("<11i", result.buffers[0])[7:])
 
 
 def window_style(guest, hwnd: int) -> int:
@@ -234,6 +252,9 @@ def set_display_mode(
 
 def sys_command(guest, hwnd: int, command: int) -> None:
     guest.user32.PostMessageA(hwnd, WM_SYSCOMMAND, command, 0)
+
+
+CLOSE_TIMEOUT, CLOSE_POLL = 5.0, 0.05  # seconds for a window to go once it is told to
 
 
 def close_window(guest, hwnd: int) -> None:

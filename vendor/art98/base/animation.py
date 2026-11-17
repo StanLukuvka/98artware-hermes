@@ -55,6 +55,10 @@ class Animation:
     def interpolate(self, alpha: float) -> None:
         pass
 
+    def abort(self, scene) -> None:
+        """Called instead of `finish` when the play raised after `begin`: undo
+        any state `begin` set that only `finish` would clear."""
+
     def finish(self, scene) -> None:
         """Once, at the end: a window target is read back (not per frame) so a
         place the guest did not give is reported."""
@@ -144,6 +148,11 @@ class AnimationGroup(Animation):
         super().begin(scene)
         self._begun.clear()
         self._finished.clear()
+
+    def abort(self, scene) -> None:
+        for index, animation in enumerate(self.animations):
+            if index in self._begun and index not in self._finished:
+                animation.abort(scene)
 
     def update(self, progress: float) -> None:
         now = self.rate_func(progress) * self.natural_time

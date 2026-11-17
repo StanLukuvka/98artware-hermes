@@ -55,6 +55,12 @@ class Picture(Win):
         """The title a state gives a Picture window that names none."""
         return "Picture"
 
+    def to_state(self, files: Path) -> dict:
+        state = self._state_base()
+        if self.image is not None:
+            state["open"] = self._state_file(files, self.image.name, self._image_data)
+        return state
+
     def attach(self, scene) -> None:
         guest = scene.guest
         args = [

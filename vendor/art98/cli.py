@@ -192,6 +192,7 @@ def cmd_render(args) -> int:
                 args.output,
                 gif=args.gif,
                 gif_options=options,
+                section=args.section,
                 session=session,
             )
     except Art98Error as error:
@@ -314,6 +315,14 @@ def main(argv: list[str] | None = None) -> int:
     )
     command.add_argument("-o", "--output", type=Path, help="output file, .mp4 or .gif")
     command.add_argument("--gif", type=Path, help="write a GIF as well")
+    command.add_argument(
+        "--section",
+        metavar="NAME",
+        help=(
+            "play only this section, from the capture an earlier full render made "
+            "(output defaults to SCENE-NAME.mp4)"
+        ),
+    )
     command.add_argument("--work", type=Path, default=None, help=WORK_HELP)
     command.add_argument(
         "--gif-fps", type=int, help=f"GIF frames per second (default {GIF_FPS})"

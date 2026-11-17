@@ -81,8 +81,12 @@ class PointerAction(Animation):
         self.pointer = scene.pointer
         self.pointer.refresh()
         self.start = self.pointer.get_center()
-        self.end = point_of(self.target)
+        self.end = point_of(self.aim())
         self.events = self.schedule()
+
+    def aim(self):
+        """Where the pointer goes: the target, unless an action says otherwise."""
+        return self.target
 
     def schedule(self) -> list:
         return []
@@ -117,6 +121,11 @@ class Hover(PointerAction):
 
     `hold` is seconds at the target. Tooltips are timed by the guest, so the
     frames of this animation follow the host clock.
+
+    A hover over the taskbar clock shows a tooltip that Windows times itself,
+    and it can still be up when the play returns. The scene's tracking checks
+    let it be, and the claim ends once it has been seen and is gone (or after
+    `CLOSE_TIMEOUT` seconds if none shows).
     """
 
     live = True
@@ -129,6 +138,14 @@ class Hover(PointerAction):
         super().__init__(target, **kwargs)
         self.run_time = travel_time + hold
         self.travel = travel_time / self.run_time if self.run_time else 0.0
+
+    def schedule(self) -> list:
+        return [(self.travel, self._claim_tooltip)]
+
+    def _claim_tooltip(self) -> None:
+        self.scene.claim_until_gone(
+            "Hover's tooltip", lambda row: row.class_name == win32.TOOLTIP_CLASS
+        )
 
 
 class Click(PointerAction):
@@ -158,9 +175,31 @@ class Click(PointerAction):
 
 
 class RightClick(Click):
-    """Click with the right button. A context menu opens on the release."""
+    """Click with the right button. A context menu opens on the release.
+
+    The menu stays up until something dismisses it, such as `Keys("esc")`. Until
+    then the scene's tracking checks let it be. The claim waits for the menu to
+    show up, since the guest may draw it after this play ends, and ends once it
+    has been seen and is gone. If no menu appears within `CLOSE_TIMEOUT` seconds
+    the claim ends anyway. Pass `menu=False` for a right click that opens no menu
+    (a flag in Minesweeper), so it claims nothing.
+    """
 
     button = "right"
+
+    def __init__(self, target, *, menu: bool = True, **kwargs):
+        super().__init__(target, **kwargs)
+        self.menu = menu
+
+    def _release(self) -> None:
+        super()._release()
+        if self.menu:
+            self._claim_menu()
+
+    def _claim_menu(self) -> None:
+        self.scene.claim_until_gone(
+            "RightClick's menu", lambda row: row.class_name == win32.MENU_CLASS
+        )
 
 
 class DoubleClick(Click):

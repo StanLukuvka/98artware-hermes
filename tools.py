@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import base64
 import json
+import re
 import threading
 import time
 from pathlib import Path
@@ -178,9 +179,12 @@ def art98_render(args: dict, session_id: str = "") -> Any:
     name = args.get("scene") or None
     if name is not None and not str(name).isidentifier():
         return _err("scene must be a class name, e.g. 'Showcase'", code="bad_arguments")
+    section = args.get("section") or None
+    if section is not None and not re.fullmatch(r"[A-Za-z0-9_-]+", str(section)):
+        return _err("section must be letters, digits, '_' and '-' only", code="bad_arguments")
     desk = get_desk()
     if not getattr(desk, "runs_code", False):
-        return _ok(**desk.render(str(scene), str(out), name))
+        return _ok(**desk.render(str(scene), str(out), name, section))
     if not config.load()["allow_render"]:
         return _err("art98_render is off: it runs the scene script as Python on the Hermes machine. "
                     "The user can turn on allow_render in the plugin settings", code="disabled")
@@ -189,7 +193,24 @@ def art98_render(args: dict, session_id: str = "") -> Any:
             return _err("art98_render runs the scene as Python, so the user approves each render, and "
                         "this one wasn't approved (declined, nobody there to ask, or the script "
                         "changed after it was approved)", code="not_approved")
-        return _ok(**desk.render(str(copy), str(out), name))
+        result = desk.render(str(copy), str(out), name, section)
+        if not section:
+            _keep_captures(copy.parent, scene.parent)
+        return _ok(**result)
+
+
+def _keep_captures(tmp, dest) -> None:
+    """After a full render, move the section captures it wrote (real *.sections folders in the
+    temp run) next to the real scene, replacing the old ones. Symlinks are never followed."""
+    import shutil
+    for entry in tmp.iterdir():
+        if entry.name.endswith(".sections") and entry.is_dir() and not entry.is_symlink():
+            old = dest / entry.name
+            if old.is_symlink() or old.is_file():
+                old.unlink()
+            elif old.is_dir():
+                shutil.rmtree(old)
+            shutil.move(str(entry), str(old))
 
 
 def _imported(text: str) -> set[str]:
@@ -236,7 +257,7 @@ def _snapshot(scene):
                 (tmp / rel).parent.mkdir(parents=True, exist_ok=True)
                 (tmp / rel).write_text(text, encoding="utf-8")
             for entry in src.iterdir():
-                if entry.name in files or entry.name in dirs or entry.name.startswith((".", "__")):
+                if entry.name in files or entry.name in dirs or entry.name.startswith((".", "__")) or entry.name.endswith((".sections.part", ".sections.old")):
                     continue
                 if entry.is_dir() and not _has_python(entry):
                     (tmp / entry.name).symlink_to(entry, target_is_directory=True)

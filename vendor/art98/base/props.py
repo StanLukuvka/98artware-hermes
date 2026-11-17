@@ -154,6 +154,9 @@ class Box:
 class Prop(Box):
     """Something on stage. Adding it to a scene is what brings it to life."""
 
+    # The id a scene knows this prop by (`add(prop, id=...)`, or a state's window id).
+    state_id: str | None = None
+
     def __init__(self, x: float = 0, y: float = 0, width: float = 0, height: float = 0):
         super().__init__(x, y, width, height)
         self.scene = None

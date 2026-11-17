@@ -50,7 +50,7 @@ class Desk:
     def revert(self) -> dict: raise NotImplementedError
     def set_state(self, state_path: str) -> dict: raise NotImplementedError
     def record(self, action: str, out_path: str | None = None) -> dict: raise NotImplementedError
-    def render(self, animation_path: str, out_path: str, scene: str | None = None) -> dict: raise NotImplementedError
+    def render(self, animation_path: str, out_path: str, scene: str | None = None, section: str | None = None) -> dict: raise NotImplementedError
 
 
 class StubDesk(Desk):
@@ -73,7 +73,7 @@ class StubDesk(Desk):
     def revert(self): self._no("revert")
     def set_state(self, state_path): self._no("set_state")
     def record(self, action, out_path=None): self._no("record")
-    def render(self, animation_path, out_path, scene=None): self._no("render")
+    def render(self, animation_path, out_path, scene=None, section=None): self._no("render")
 
 
 class PendingDesk(StubDesk):
@@ -337,7 +337,7 @@ class DriveDesk(Desk):
     def record(self, action, out_path=None):
         raise DeskError("live recording is not built yet; write a scene and use art98_render", "not_built")
 
-    def render(self, animation_path, out_path, scene=None):
+    def render(self, animation_path, out_path, scene=None, section=None):
         import os
         import subprocess
         import sys
@@ -350,7 +350,8 @@ class DriveDesk(Desk):
         env.update({k: v for k, v in os.environ.items() if k.startswith("ART98_") and k != TOKEN_ENV})
         env.update(PYTHONPATH=str(self.core), ART98_TOKEN=settings.token)
         cmd = [sys.executable, "-c", RENDER_CHILD,
-               "render", str(animation_path), *([scene] if scene else []), "-o", str(out), "--wait", "60"]
+               "render", str(animation_path), *([scene] if scene else []), *(["--section", section] if section else []),
+               "-o", str(out), "--wait", "60"]
         self._mark("render", Path(animation_path).name)
         # Its own process group, so a timeout also stops anything the scene started.
         child = subprocess.Popen(cmd, cwd=self.client, env=env, stdout=subprocess.PIPE,

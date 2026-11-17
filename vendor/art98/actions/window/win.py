@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
 
 from ...base.props import Prop, Spot
@@ -32,6 +33,8 @@ class Win(Prop):
     window_class: str | None = None
     # The constructor keyword a state's `open` file is passed as.
     open_keyword: str | None = None
+    # Extra state window fields this program accepts (see `state.py`).
+    state_fields: tuple[str, ...] = ()
 
     @staticmethod
     def check_file(data: bytes, source: str) -> None:
@@ -49,6 +52,39 @@ class Win(Prop):
         by setstate once the prop is added, and read back by `refresh`."""
         opened = {} if window.open is None else {cls.open_keyword: window.open.path}
         return cls(window.title, at=window.at, size=window.size, **opened)
+
+    def to_state(self, files: Path) -> dict:
+        """The state file's JSON for this window. Files it needs are written under
+        `files/windows/<id>/`, and named relative to `files.parent`, the state file's folder."""
+        raise UsageError(f"{type(self).__name__} can't be captured yet")
+
+    def _state_base(self) -> dict:
+        """What every `to_state` has: app, live title, normal place and show state."""
+        # apps.py imports the programs, which import this module
+        from ..apps import APPS
+
+        app = next((n for n, cls in APPS.items() if isinstance(self, cls)), None)
+        row = next((w for w in self.guest.windows() if w.hwnd == self.hwnd), None)
+        if app is None or row is None:
+            raise UsageError(f"{self._name()} can't be captured: no window to read")
+        left, top, right, bottom = win32.normal_rect(self.guest, self.hwnd)
+        return {
+            "app": app,
+            "title": row.title,
+            "at": [left, top],
+            "size": [right - left, bottom - top],
+            "show": win32.show_state(self.guest, self.hwnd),
+        }
+
+    def _state_file(self, files: Path, name: str, data: bytes) -> dict:
+        """Write `data` as `files/windows/<id>/<name>`; the state's file reference to it."""
+        path = files / "windows" / self.state_id / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(data)
+        return {
+            "file": path.relative_to(files.parent).as_posix(),
+            "sha256": hashlib.sha256(data).hexdigest(),
+        }
 
     def __init__(
         self,
@@ -87,6 +123,11 @@ class Win(Prop):
         self._top_level = True  # a control is not sized or settled: see `_child`
         self._sizable = False  # WS_THICKFRAME, read at attach
         self._warned: set[str] = set()
+        # Set by Close while it ends the window, so a window on its way out is not "gone".
+        self.closing = False
+        # (pid, class) of the top-level row read at attach, to tell a reused hwnd
+        # from this window. None for a handle that isn't a top-level window.
+        self._identity: tuple[int, str] | None = None
 
     def attach(self, scene) -> None:
         super().attach(scene)
@@ -101,6 +142,17 @@ class Win(Prop):
         elif window_rect(self.guest, self.hwnd) is None:
             raise NotFound(f"no window {self.hwnd:#x}")
         if self._top_level:
+            for other in scene.props:
+                if (
+                    isinstance(other, Win)
+                    and other is not self
+                    and other.hwnd == self.hwnd
+                ):
+                    raise UsageError(
+                        f"{self._name()} is the window {other._name()} already owns"
+                        f" ({self.hwnd:#x}): one prop per window"
+                    )
+            self._identity = self._read_identity()
             self._sizable = bool(
                 win32.window_style(self.guest, self.hwnd) & win32.WS_THICKFRAME
             )
@@ -114,6 +166,20 @@ class Win(Prop):
         if self._top_level:
             self.settle()
             self.ready()
+
+    def _read_identity(self) -> tuple[int, str] | None:
+        for row in self.guest.windows():
+            if row.hwnd == self.hwnd:
+                return row.pid, row.class_name.lower()
+        return None
+
+    def is_gone(self, rows: dict[int, Window]) -> bool:
+        """Whether the window has left `rows` (the guest's top-level windows by
+        handle), or the handle now belongs to another window: Windows reuses them."""
+        if self._identity is None:
+            return False
+        row = rows.get(self.hwnd)
+        return row is None or (row.pid, row.class_name.lower()) != self._identity
 
     def min_size(self) -> tuple[int, int] | None:
         """The least outer size this window can take, or None for no least.
@@ -409,3 +475,4 @@ class Win(Prop):
         # The window went with the revert. Adding the prop again opens a new one.
         super().forget()
         self.hwnd, self._sent, self.show = None, None, "normal"
+        self.closing, self._identity = False, None

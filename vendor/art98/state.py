@@ -12,14 +12,22 @@ touched, so a mistake in the file never leaves a half-made desktop.
       "windows": [
         {"id": "flower", "app": "picture" | "notepad", "title": "Flower",
          "at": [60, 60], "size": [300, 220], "show": "normal",
-         "open": {"file": "assets/flower.bmp", "sha256": "..."}}
+         "open": {"file": "assets/flower.bmp", "sha256": "..."}},
+        {"id": "note", "app": "notepad", "at": [100, 80], "size": [320, 200],
+         "text": {"file": "assets/note.txt", "sha256": "..."}}
       ],
+      "stack": ["flower", "note"],
       "pointer": [400, 500]
     }
 
-Windows are listed back to front, so the last one is on top and active.
+`windows` is in creation order (Windows 98 orders taskbar buttons by it). `stack`
+is optional: the window ids back to front, the last on top and active. Without it
+the list order is the z-order too.
 Anything a state leaves out stays as it is on the baseline. Files are found
 relative to the state file, and their hash must match. Unknown fields fail.
+A notepad window's `text` is the contents of its edit box, set after it opens, and its
+`selection` is [start, end], the character offsets of the selected text or caret
+(default [0, 0]).
 
 `desktop` is optional, and so is each part of it. `fill_colour` is the plain desktop colour
 behind the icons and around a centred wallpaper (Windows calls it "Desktop" in Display
@@ -38,15 +46,25 @@ from pathlib import Path
 from .actions.apps import APPS
 from .desktop import STYLES, resolve_colour
 from .errors import Art98Error, NotFound, UsageError
-from .guest.guestfiles import check_bmp, name_problem, title_problem
+from .guest.guestfiles import check_bmp, check_text, name_problem, title_problem
 from .guest.win32 import DISPLAY_SIZES
 
 VERSION = 1
 SHOWS = ("normal", "minimized", "maximized")
 DEPTHS = (8, 16, 24, 32)
-TOP_FIELDS = {"version", "display", "desktop", "windows", "pointer"}
+TOP_FIELDS = {"version", "display", "desktop", "windows", "stack", "pointer"}
 DESKTOP_FIELDS = {"fill_colour", "wallpaper", "style"}
-WINDOW_FIELDS = {"id", "app", "title", "at", "size", "show", "open"}
+WINDOW_FIELDS = {
+    "id",
+    "app",
+    "title",
+    "at",
+    "size",
+    "show",
+    "open",
+    "text",
+    "selection",
+}
 FILE_FIELDS = {"file", "sha256"}
 LATER = {"focus": "order the windows instead: the last one is active"}
 LATER_DESKTOP = {
@@ -87,6 +105,8 @@ class WindowState:
     size: tuple[int, int]
     show: str = "normal"
     open: FileRef | None = None
+    text: FileRef | None = None
+    selection: tuple[int, int] | None = None
 
 
 @dataclass(frozen=True)
@@ -103,6 +123,15 @@ class State:
     windows: tuple[WindowState, ...]
     pointer: tuple[int, int] | None
     desktop: DesktopState | None = None
+    stack: tuple[str, ...] | None = None  # window ids, back to front
+
+    @property
+    def back_to_front(self) -> tuple[WindowState, ...]:
+        """The windows in z-order: `stack` if given, else the list order."""
+        if self.stack is None:
+            return self.windows
+        by_id = {w.id: w for w in self.windows}
+        return tuple(by_id[i] for i in self.stack)
 
     def window(self, id: str) -> WindowState:
         for window in self.windows:
@@ -222,8 +251,8 @@ class _Reader:
             return None
         problems = len(self.problems)
         id_ = value.get("id")
-        if not isinstance(id_, str) or not id_:
-            self.fail(f"{where}.id", "needs a name")
+        if problem := id_problem(id_):
+            self.fail(f"{where}.id", problem)
         app = value.get("app")
         known = isinstance(app, str) and app in APPS
         if not known:
@@ -256,11 +285,30 @@ class _Reader:
                     APPS[app].check_file(opened.data, str(opened.path))
                 except UsageError as error:
                     self.fail(f"{where}.open", str(error))
+        text = None
+        if "text" in value:
+            if known and "text" not in APPS[app].state_fields:
+                self.fail(f"{where}.text", f"{app} windows can't have text")
+            else:
+                text = self.file(value["text"], f"{where}.text")
+                if text is not None:
+                    try:
+                        check_text(text.data, str(text.path))
+                    except UsageError as error:
+                        self.fail(f"{where}.text", str(error))
+        selection = None
+        if "selection" in value:
+            if known and "selection" not in APPS[app].state_fields:
+                self.fail(f"{where}.selection", f"{app} windows can't have a selection")
+            else:
+                selection = self.numbers(value["selection"], 2, f"{where}.selection")
+                if selection and not 0 <= selection[0] <= selection[1]:
+                    self.fail(f"{where}.selection", "needs 0 <= start <= end")
         if len(self.problems) > problems:
             return None
         if title is None:
             title = APPS[app].default_title(opened.path if opened else None)
-        return WindowState(id_, app, title, at, size, show, opened)
+        return WindowState(id_, app, title, at, size, show, opened, text, selection)
 
     def state(self, value) -> State | None:
         if not self.fields(value, TOP_FIELDS, "state"):
@@ -291,6 +339,17 @@ class _Reader:
                 self.fail(f"windows[{index}].id", f"{window.id!r} is used twice")
             seen.add(window.id)
             windows.append(window)
+        stack = None
+        if "stack" in value:
+            ids = value["stack"]
+            if (
+                not isinstance(ids, list)
+                or sorted(map(str, ids)) != sorted(seen)
+                or (len(set(map(str, ids))) != len(ids))
+            ):
+                self.fail("stack", "should list every window id once, back to front")
+            else:
+                stack = tuple(ids)
         pointer = None
         if "pointer" in value:
             pointer = self.numbers(value["pointer"], 2, "pointer")
@@ -306,7 +365,16 @@ class _Reader:
                 )
         if self.problems:
             return None
-        return State(self.path, display, tuple(windows), pointer, desktop)
+        return State(self.path, display, tuple(windows), pointer, desktop, stack)
+
+
+def id_problem(id) -> str | None:
+    """Why `id` can't name a window (it becomes a folder name), or None if it can."""
+    if not isinstance(id, str) or not id:
+        return "needs a name"
+    if not all(c.isascii() and (c.isalnum() or c in "_-") for c in id):
+        return f"{id!r} should be letters, digits, _ and - only"
+    return None
 
 
 def load_state(path: Path | str) -> State:
@@ -325,3 +393,39 @@ def load_state(path: Path | str) -> State:
     if state is None:
         raise StateError(path, reader.problems)
     return state
+
+
+_ORDER = {
+    "top": ("version", "display", "desktop", "windows", "stack", "pointer"),
+    "desktop": ("fill_colour", "wallpaper", "style"),
+    "window": ("id", "app", "title", "at", "size", "show", "open", "text", "selection"),
+    "file": ("file", "sha256"),
+}
+_FILE_KEYS = {"wallpaper", "open", "text"}
+
+
+def _ordered(value: dict, kind: str) -> dict:
+    # Keys outside the schema go last, so load_state names them.
+    keys = _ORDER[kind]
+    rest = sorted(set(value) - set(keys))
+    return {k: value[k] for k in (*keys, *rest) if k in value}
+
+
+def dump_state(state_json: dict, path: Path | str) -> State:
+    """Write a state file with a fixed key order, so the bytes are the same every
+    time, then load it back (checking it) and return the State."""
+    out = _ordered(state_json, "top")
+    if isinstance(out.get("desktop"), dict):
+        out["desktop"] = _ordered(out["desktop"], "desktop")
+        for key in _FILE_KEYS & set(out["desktop"]):
+            out["desktop"][key] = _ordered(out["desktop"][key], "file")
+    if isinstance(out.get("windows"), list):
+        windows = []
+        for window in out["windows"]:
+            window = _ordered(window, "window")
+            for key in _FILE_KEYS & set(window):
+                window[key] = _ordered(window[key], "file")
+            windows.append(window)
+        out["windows"] = windows
+    Path(path).write_text(json.dumps(out, indent=2) + "\n", encoding="utf-8")
+    return load_state(path)

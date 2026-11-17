@@ -1,1 +1,7 @@
-"""The container side: `serve` runs QEMU and the control server inside the art98 container; `host` is the host-side client (`RemoteVM`) and engine helpers."""
+"""The VM service: one long-lived container that runs the VM.
+
+`service.py` is `start`, `stop`, `status` and `attach()`, which every render uses. `compose.py` and
+`host.py` run on the host: the compose project, and the engine, `open_channel` and `RemoteVM`.
+`serve.py` runs inside the container, and `entry.py` is the image's entry point. `freshness.py`
+warns when the image or the guest programs are older than the code.
+"""

@@ -10,6 +10,8 @@ from ...guest import guestfiles, win32
 from ...guest.bridge import wait_for
 from ...guest.win32 import (
     BM_CLICK,
+    CLOSE_POLL,
+    CLOSE_TIMEOUT,
     DIALOG_CLASS,
     SS_ICON,
     SS_TYPEMASK,
@@ -26,7 +28,6 @@ NO_ICON, NOT_ICON_FILE = (
 )  # ExtractIconA's answers for "no icon" and "not an icon file"
 DISABLED = 0  # EnableWindow's bEnable, to grey a button
 REPAINT = 1  # MoveWindow's bRepaint
-CLOSE_TIMEOUT, CLOSE_POLL = 5.0, 0.05  # seconds for a box to go once it is told to
 
 
 class Dialog(Win):
@@ -277,19 +278,22 @@ class Dialog(Win):
             raise UsageError("Dialog is not on stage: add it to the scene first")
         return self.guest
 
-    def remove(self) -> None:
+    def remove(self, button: Win | None = None) -> None:
         """Close the box, then destroy its custom icon once the box has gone.
 
-        A box with no Cancel button ignores WM_CLOSE, so its No or Abort
-        button is pressed instead (see `DECLINE`).
+        With `button`, that button is pressed, so the box returns its answer.
+        Otherwise a box with no Cancel button ignores WM_CLOSE, so its No or
+        Abort button is pressed instead (see `DECLINE`).
         """
         user32 = self.guest.user32
         if self.hwnd is not None and user32.IsWindow(self.hwnd).value:
-            if self._button_set in self.DECLINE:
-                button = user32.GetDlgItem(
+            if button is not None:
+                user32.SendMessageA(button.hwnd, BM_CLICK, 0, 0)
+            elif self._button_set in self.DECLINE:
+                decline = user32.GetDlgItem(
                     self.hwnd, self.DECLINE[self._button_set]
                 ).value
-                user32.SendMessageA(button, BM_CLICK, 0, 0)
+                user32.SendMessageA(decline, BM_CLICK, 0, 0)
             else:
                 self.close()
             gone = wait_for(

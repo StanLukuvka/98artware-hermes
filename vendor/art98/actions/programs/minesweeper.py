@@ -9,7 +9,7 @@ from ...base.props import Spot
 from ...base.units import distance
 from ...errors import GuestError, UsageError
 from ...guest.bridge import BridgeTimeout
-from ...guest.win32 import SW_HIDE, SW_SHOWNA, screen_dc, show_window
+from ...guest.win32 import DIALOG_CLASS, SW_HIDE, SW_SHOWNA, screen_dc, show_window
 from ..keyboard import Keys, TypeKeys
 from ..pointer import Click, RightClick
 from ..window.win import Win
@@ -45,11 +45,13 @@ class Minesweeper(Win):
         # None until find_mines reads them. A set is kept as read: a new game needs find_mines again.
         self.mines: frozenset[tuple[int, int]] | None = None
         self._board: tuple[int, int] | None = None  # columns and rows, see `_grid`
+        self._prompt = None  # the Claim `clear` opens for the best-time prompt
 
     def forget(self) -> None:
         super().forget()
         self.mines = None
         self._board = None
+        self._prompt = None
 
     @property
     def board_size(self) -> tuple[int, int]:
@@ -172,6 +174,8 @@ class Minesweeper(Win):
 
         remaining = cells - self.mines
         first = max(sorted(remaining), key=lambda cell: len(self.opened_by(cell)))
+        if not remaining - self.opened_by(first):
+            self._claim_prompt()
         scene.play(Click(self.cell(*first)))
         remaining -= self.opened_by(first)
         scene.pause(FIRST_CLICK_PAUSE)
@@ -180,30 +184,50 @@ class Minesweeper(Win):
         while flags:
             mine = nearest(flags)
             flags.discard(mine)
-            scene.play(RightClick(self.cell(*mine), run_time=CLICK_TIME))
+            scene.play(RightClick(self.cell(*mine), menu=False, run_time=CLICK_TIME))
         while remaining:
             cell = nearest(remaining)
+            if not remaining - self.opened_by(cell):
+                self._claim_prompt()
             scene.play(Click(self.cell(*cell), run_time=CLICK_TIME))
             remaining -= self.opened_by(cell)
+
+    def _claim_prompt(self):
+        """Claim the best-time prompt and its table, opened before the winning click.
+
+        The claim stays on the prop until `sign_scoreboard` releases it.
+        """
+        if self._prompt is None or not self._prompt.active:
+            pid = self._identity[0] if self._identity else None
+            self._prompt = self.scene.claim(
+                "Minesweeper's best-time prompt and table",
+                lambda row: row.class_name == DIALOG_CLASS and row.pid == pid,
+                hint="Minesweeper's best-time prompt is still up: call sign_scoreboard()",
+            )
+        return self._prompt
 
     def sign_scoreboard(self, name: str = "art98") -> None:
         """Answer the best time prompt that follows a win, and show the table.
 
         Winning a first game always beats the best time, so the prompt comes up.
+        `clear` claims the prompt while it is up. Call this after it, or the run
+        ends with the prompt still on screen and fails.
         """
         scene = self.scene
-        self._wait_for_window(
-            "Congratulations",
-            "no best-time prompt: was the game won, and is it a new best time?",
-        )
-        scene.pause(PROMPT_PAUSE)
-        scene.play(
-            TypeKeys(name + "\n", run_time=TYPE_SECONDS_PER_KEY * (len(name) + 1))
-        )
-        self._wait_for_window("Best Times", "no Best Times table after the name")
-        scene.pause(TABLE_PAUSE)
-        scene.play(Keys("enter"))
-        scene.pause(PROMPT_PAUSE)
+        with self._claim_prompt():
+            self._prompt = None
+            self._wait_for_window(
+                "Congratulations",
+                "no best-time prompt: was the game won, and is it a new best time?",
+            )
+            scene.pause(PROMPT_PAUSE)
+            scene.play(
+                TypeKeys(name + "\n", run_time=TYPE_SECONDS_PER_KEY * (len(name) + 1))
+            )
+            self._wait_for_window("Best Times", "no Best Times table after the name")
+            scene.pause(TABLE_PAUSE)
+            scene.play(Keys("enter"))
+            scene.pause(PROMPT_PAUSE)
 
     def _wait_for_window(self, title: str, missing: str) -> None:
         """Wait for a window the game shows, or say what it means that it did not come."""

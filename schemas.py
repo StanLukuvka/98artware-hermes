@@ -90,7 +90,8 @@ ART98_RENDER = _tool(
     "Every scene starts from a fresh desktop. On failure the error ends with the scene's line.",
     {"animation": {"type": "string", "description": "File name in animations/, e.g. 'intro.py'."},
      "output": {"type": "string", "description": "File name in recordings/, .mp4 or .gif, e.g. 'intro.mp4'."},
-     "scene": {"type": "string", "description": "Scene class to render, when the file holds more than one."}},
+     "scene": {"type": "string", "description": "Scene class to render, when the file holds more than one."},
+     "section": {"type": "string", "description": "Render only this section (a name the scene passes to self.section), from the capture an earlier full render of the same scene made. Leave out for a full render, which also refreshes the captures."}},
     ["animation", "output"],
 )
 

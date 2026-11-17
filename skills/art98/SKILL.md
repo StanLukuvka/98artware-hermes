@@ -1,7 +1,7 @@
 ---
 name: art98
 description: Drive a Windows 98 VM and render art98 scenes.
-version: 0.6.0
+version: 0.7.0
 author: StanLukuvka
 license: MIT
 platforms: [linux]
@@ -102,8 +102,9 @@ class Hello(Scene):
 - `Win.from_state(window)` builds the prop for one window of a state file (what `set_state` does
   for each window). A window prop also has `maximize()`, `minimize()` and `restore()`, which act
   like the title-bar buttons.
-- `box.remove()` closes a `Dialog`. A box with no Cancel button (`yesno`, `abortretryignore`)
-  ignores a plain close, so `remove` answers it No or Abort instead.
+- `self.play(Close(box))` (or `self.remove(box)`) closes a `Dialog`. A box with no Cancel button
+  (`yesno`, `abortretryignore`) ignores a plain close, so it is answered No or Abort instead.
+  Don't call `box.remove()` yourself: the prop stays on stage with its window gone.
 - `output_fps` is the video's frame rate. Older scripts that set `fps` still run, but write
   `output_fps` in new ones; setting both to different values is an error.
 - `self.add(x)` shows a thing at once, `self.play(x)` runs an action, `self.pause(s)` holds.
